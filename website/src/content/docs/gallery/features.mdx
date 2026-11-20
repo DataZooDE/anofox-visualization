@@ -42,6 +42,8 @@ import t17l from "../../../assets/gallery/features/17-light.webp";
 import t17d from "../../../assets/gallery/features/17-dark.webp";
 import t18l from "../../../assets/gallery/features/18-light.webp";
 import t18d from "../../../assets/gallery/features/18-dark.webp";
+import t19l from "../../../assets/gallery/features/19-light.webp";
+import t19d from "../../../assets/gallery/features/19-dark.webp";
 
 Beyond single charts: clicks that filter and drill, switchable views, composed figures, guided steps, annotations from data, diagrams, factor graphs, Bayesian networks and their automatic analysis — each a few lines of SQL.
 
@@ -481,6 +483,40 @@ FROM bn_nodes n;
 ```
 
 <a class="gal-edit" href="../../app/?mode=edit#sql=Q1JFQVRFIFRBQkxFIGdlbyBBUyBTRUxFQ1QgKiBGUk9NIChWQUxVRVMKICAoJ0VVJywnR2VybWFueScsJ0JlcmxpbicpLCgnRVUnLCdHZXJtYW55JywnTXVuaWNoJyksKCdFVScsJ0ZyYW5jZScsJ1BhcmlzJyksKCdFVScsJ0ZyYW5jZScsJ0x5b24nKSwKICAoJ0FtZXJpY2FzJywnVVNBJywnTmV3IFlvcmsnKSwoJ0FtZXJpY2FzJywnVVNBJywnQ2hpY2FnbycpLCgnQW1lcmljYXMnLCdDYW5hZGEnLCdUb3JvbnRvJyksCiAgKCdBUEFDJywnSmFwYW4nLCdUb2t5bycpLCgnQVBBQycsJ0phcGFuJywnT3Nha2EnKSwoJ0FQQUMnLCdBdXN0cmFsaWEnLCdTeWRuZXknKSkgdChyZWdpb24sIGNvdW50cnksIGNpdHkpOwpDUkVBVEUgVEFCTEUgb3JkZXJzIEFTClNFTEVDVCBEQVRFICcyMDI2LTAxLTA1JyArICg3ICogdyk6OklOVCBBUyB3ZWVrLCBnLnJlZ2lvbiwgZy5jb3VudHJ5LCBnLmNpdHksIGMuY2hhbm5lbCwKICAgICAgIChhYnMoaGFzaChnLmNpdHkgfHwgYy5jaGFubmVsIHx8IHcpKSAlIDYwICsgMjAgKyAyICogdykgQVMgcmV2ZW51ZQpGUk9NIGdlbyBnLCAoVkFMVUVTICgnd2ViJyksICgnYXBwJyksICgnc3RvcmUnKSkgYyhjaGFubmVsKSwgcmFuZ2UoMjYpIHIodyk7ClNFTEVDVCAyOjpDT0xVTU5TOwoKU0VMRUNUICdiYXllcy1uZXQnOjpSRVFVSVJFUzsKU0VMRUNUIDEyOjpDT0w7CkNSRUFURSBUQUJMRSBibl9ub2RlcyBBUwpTRUxFQ1QgKiBGUk9NIChWQUxVRVMgKCdjbG91ZHknLCAnQ2xvdWR5JywgJ2NoYW5jZScpLCAoJ3Nwcmlua2xlcicsICdTcHJpbmtsZXIgb24nLCAnY2hhbmNlJyksCiAgICAgICAgICAgICAgICAgICAgICAoJ3JhaW4nLCAnUmFpbicsICdjaGFuY2UnKSwgKCdncmFzcycsICdXZXQgZ3Jhc3MnLCAnb2JzZXJ2ZWQnKSkgdChpZCwgbGFiZWwsIGtpbmQpLCAoU0VMRUNUIFsneWVzJywgJ25vJ10gQVMgc3RhdGVzKTsKLS0gZXhhY3QgYmVsaWVmcyB3aXRoIHRoZSBncmFzcyBzZWVuIHdldCwgYW5kIGJlZm9yZSAocHJpb3IpCkNSRUFURSBUQUJMRSBibl9iZWxpZWZzIEFTClNFTEVDVCBub2RlLCBzLnN0YXRlLCBDQVNFIHMuc3RhdGUgV0hFTiAneWVzJyBUSEVOIHAgRUxTRSAxIC0gcCBFTkQgQVMgcHJvYmFiaWxpdHksIENBU0Ugcy5zdGF0ZSBXSEVOICd5ZXMnIFRIRU4gcSBFTFNFIDEgLSBxIEVORCBBUyBwcmlvcgpGUk9NIChWQUxVRVMgKCdjbG91ZHknLCAwLjU3NTgsIDAuNSksICgnc3ByaW5rbGVyJywgMC40Mjk4LCAwLjMpLCAoJ3JhaW4nLCAwLjcwNzksIDAuNSksICgnZ3Jhc3MnLCAxLjAsIDAuNjQ3MSkpIHQobm9kZSwgcCwgcSksCiAgICAgKFZBTFVFUyAoJ3llcycpLCAoJ25vJykpIHMoc3RhdGUpOwpTRUxFQ1QgYW5vZm94X3Bsb3RfYmF5ZXNfbmV0KG4sCiAgICAgICAgIGFyY3MgOj0gW3snZnJvbSc6ICdjbG91ZHknLCAndG8nOiAnc3ByaW5rbGVyJ30sIHsnZnJvbSc6ICdjbG91ZHknLCAndG8nOiAncmFpbid9LAogICAgICAgICAgICAgICAgICB7J2Zyb20nOiAnc3ByaW5rbGVyJywgJ3RvJzogJ2dyYXNzJ30sIHsnZnJvbSc6ICdyYWluJywgJ3RvJzogJ2dyYXNzJ31dLAogICAgICAgICBiZWxpZWZzIDo9IChTRUxFQ1QgbGlzdChiKSBGUk9NIGJuX2JlbGllZnMgYiksCiAgICAgICAgIGV2aWRlbmNlIDo9IFt7J25vZGUnOiAnZ3Jhc3MnLCAnc3RhdGUnOiAneWVzJ31dLAogICAgICAgICB0YWJsZXMgOj0gW3snbm9kZSc6ICdyYWluJywgJ3BhcmVudF9zdGF0ZXMnOiBbJ3llcyddLCAnc3RhdGUnOiAneWVzJywgJ3Byb2JhYmlsaXR5JzogMC44fSwKICAgICAgICAgICAgICAgICAgICB7J25vZGUnOiAncmFpbicsICdwYXJlbnRfc3RhdGVzJzogWyd5ZXMnXSwgJ3N0YXRlJzogJ25vJywgJ3Byb2JhYmlsaXR5JzogMC4yfSwKICAgICAgICAgICAgICAgICAgICB7J25vZGUnOiAncmFpbicsICdwYXJlbnRfc3RhdGVzJzogWydubyddLCAnc3RhdGUnOiAneWVzJywgJ3Byb2JhYmlsaXR5JzogMC4yfSwKICAgICAgICAgICAgICAgICAgICB7J25vZGUnOiAncmFpbicsICdwYXJlbnRfc3RhdGVzJzogWydubyddLCAnc3RhdGUnOiAnbm8nLCAncHJvYmFiaWxpdHknOiAwLjh9XSkKICAgICAgIEFTICJUaGUgZ3Jhc3MgaXMgd2V0OiBkaWQgaXQgcmFpbj8iCkZST00gYm5fbm9kZXMgbjsK">Edit it in the builder ↗</a>
+
+</div>
+</div>
+
+<div class="gal-tile">
+<div class="gal-pic"><img class="lp-light" src={t19l.src} alt="" loading="lazy" /><img class="lp-dark" src={t19d.src} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### Seeing or doing
+
+Click a state to observe it (`'ev evidence'::SELECT_AS`) and the query recomputes the beliefs; the chip switches it to do(). Turning the sprinkler on yourself cuts its arc from the clouds (the hand), so Cloudy is back at 50 %, and each bar shows how far that click moved it.
+
+```sql
+SELECT 'bayes-net'::REQUIRES;
+SELECT 12::COL;
+CREATE TABLE bn_do_nodes AS
+SELECT * FROM (VALUES ('cloudy', 'Cloudy'), ('sprinkler', 'Sprinkler on'), ('rain', 'Rain'), ('grass', 'Wet grass')) t(id, label),
+              (SELECT 'chance' AS kind, ['yes', 'no'] AS states);
+-- the beliefs with the sprinkler set on, do(), and before: seen on
+CREATE TABLE bn_do_beliefs AS
+SELECT node, s.state, CASE s.state WHEN 'yes' THEN p ELSE 1 - p END AS probability,
+       CASE s.state WHEN 'yes' THEN q ELSE 1 - q END AS prior, CASE s.state WHEN 'yes' THEN w ELSE 1 - w END AS previous
+FROM (VALUES ('cloudy', 0.5, 0.5, 0.1667), ('sprinkler', 1.0, 0.3, 1.0), ('rain', 0.5, 0.5, 0.3), ('grass', 0.945, 0.6471, 0.927)) t(node, p, q, w),
+     (VALUES ('yes'), ('no')) s(state);
+SELECT anofox_plot_bayes_net(n,
+         arcs := [{'from': 'cloudy', 'to': 'sprinkler'}, {'from': 'cloudy', 'to': 'rain'},
+                  {'from': 'sprinkler', 'to': 'grass'}, {'from': 'rain', 'to': 'grass'}],
+         beliefs := (SELECT list(b) FROM bn_do_beliefs b),
+         evidence := [{'node': 'sprinkler', 'state': 'yes', 'mode': 'do'}])
+       AS "Turning the sprinkler on: the clouds stay at 50 %"
+FROM bn_do_nodes n;
+```
+
+<a class="gal-edit" href="../../app/?mode=edit#sql=Q1JFQVRFIFRBQkxFIGdlbyBBUyBTRUxFQ1QgKiBGUk9NIChWQUxVRVMKICAoJ0VVJywnR2VybWFueScsJ0JlcmxpbicpLCgnRVUnLCdHZXJtYW55JywnTXVuaWNoJyksKCdFVScsJ0ZyYW5jZScsJ1BhcmlzJyksKCdFVScsJ0ZyYW5jZScsJ0x5b24nKSwKICAoJ0FtZXJpY2FzJywnVVNBJywnTmV3IFlvcmsnKSwoJ0FtZXJpY2FzJywnVVNBJywnQ2hpY2FnbycpLCgnQW1lcmljYXMnLCdDYW5hZGEnLCdUb3JvbnRvJyksCiAgKCdBUEFDJywnSmFwYW4nLCdUb2t5bycpLCgnQVBBQycsJ0phcGFuJywnT3Nha2EnKSwoJ0FQQUMnLCdBdXN0cmFsaWEnLCdTeWRuZXknKSkgdChyZWdpb24sIGNvdW50cnksIGNpdHkpOwpDUkVBVEUgVEFCTEUgb3JkZXJzIEFTClNFTEVDVCBEQVRFICcyMDI2LTAxLTA1JyArICg3ICogdyk6OklOVCBBUyB3ZWVrLCBnLnJlZ2lvbiwgZy5jb3VudHJ5LCBnLmNpdHksIGMuY2hhbm5lbCwKICAgICAgIChhYnMoaGFzaChnLmNpdHkgfHwgYy5jaGFubmVsIHx8IHcpKSAlIDYwICsgMjAgKyAyICogdykgQVMgcmV2ZW51ZQpGUk9NIGdlbyBnLCAoVkFMVUVTICgnd2ViJyksICgnYXBwJyksICgnc3RvcmUnKSkgYyhjaGFubmVsKSwgcmFuZ2UoMjYpIHIodyk7ClNFTEVDVCAyOjpDT0xVTU5TOwoKU0VMRUNUICdiYXllcy1uZXQnOjpSRVFVSVJFUzsKU0VMRUNUIDEyOjpDT0w7CkNSRUFURSBUQUJMRSBibl9kb19ub2RlcyBBUwpTRUxFQ1QgKiBGUk9NIChWQUxVRVMgKCdjbG91ZHknLCAnQ2xvdWR5JyksICgnc3ByaW5rbGVyJywgJ1Nwcmlua2xlciBvbicpLCAoJ3JhaW4nLCAnUmFpbicpLCAoJ2dyYXNzJywgJ1dldCBncmFzcycpKSB0KGlkLCBsYWJlbCksCiAgICAgICAgICAgICAgKFNFTEVDVCAnY2hhbmNlJyBBUyBraW5kLCBbJ3llcycsICdubyddIEFTIHN0YXRlcyk7Ci0tIHRoZSBiZWxpZWZzIHdpdGggdGhlIHNwcmlua2xlciBzZXQgb24sIGRvKCksIGFuZCBiZWZvcmU6IHNlZW4gb24KQ1JFQVRFIFRBQkxFIGJuX2RvX2JlbGllZnMgQVMKU0VMRUNUIG5vZGUsIHMuc3RhdGUsIENBU0Ugcy5zdGF0ZSBXSEVOICd5ZXMnIFRIRU4gcCBFTFNFIDEgLSBwIEVORCBBUyBwcm9iYWJpbGl0eSwKICAgICAgIENBU0Ugcy5zdGF0ZSBXSEVOICd5ZXMnIFRIRU4gcSBFTFNFIDEgLSBxIEVORCBBUyBwcmlvciwgQ0FTRSBzLnN0YXRlIFdIRU4gJ3llcycgVEhFTiB3IEVMU0UgMSAtIHcgRU5EIEFTIHByZXZpb3VzCkZST00gKFZBTFVFUyAoJ2Nsb3VkeScsIDAuNSwgMC41LCAwLjE2NjcpLCAoJ3Nwcmlua2xlcicsIDEuMCwgMC4zLCAxLjApLCAoJ3JhaW4nLCAwLjUsIDAuNSwgMC4zKSwgKCdncmFzcycsIDAuOTQ1LCAwLjY0NzEsIDAuOTI3KSkgdChub2RlLCBwLCBxLCB3KSwKICAgICAoVkFMVUVTICgneWVzJyksICgnbm8nKSkgcyhzdGF0ZSk7ClNFTEVDVCBhbm9mb3hfcGxvdF9iYXllc19uZXQobiwKICAgICAgICAgYXJjcyA6PSBbeydmcm9tJzogJ2Nsb3VkeScsICd0byc6ICdzcHJpbmtsZXInfSwgeydmcm9tJzogJ2Nsb3VkeScsICd0byc6ICdyYWluJ30sCiAgICAgICAgICAgICAgICAgIHsnZnJvbSc6ICdzcHJpbmtsZXInLCAndG8nOiAnZ3Jhc3MnfSwgeydmcm9tJzogJ3JhaW4nLCAndG8nOiAnZ3Jhc3MnfV0sCiAgICAgICAgIGJlbGllZnMgOj0gKFNFTEVDVCBsaXN0KGIpIEZST00gYm5fZG9fYmVsaWVmcyBiKSwKICAgICAgICAgZXZpZGVuY2UgOj0gW3snbm9kZSc6ICdzcHJpbmtsZXInLCAnc3RhdGUnOiAneWVzJywgJ21vZGUnOiAnZG8nfV0pCiAgICAgICBBUyAiVHVybmluZyB0aGUgc3ByaW5rbGVyIG9uOiB0aGUgY2xvdWRzIHN0YXkgYXQgNTAgJSIKRlJPTSBibl9kb19ub2RlcyBuOwo=">Edit it in the builder ↗</a>
 
 </div>
 </div>

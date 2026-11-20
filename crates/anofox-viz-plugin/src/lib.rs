@@ -145,7 +145,8 @@ pub enum ContractOutput {
     Svg(String),
     Columns {
         columns: Vec<OutColumn>,
-        /// `data-…` attributes for the panel's root `<svg>`.
+        /// `data-…` attributes for the panel's root `<svg>` (a name of at
+        /// most 40 of `a-z0-9-`, a value of at most 64 KiB characters).
         root_attrs: Vec<(String, String)>,
         warnings: Vec<String>,
     },

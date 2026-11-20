@@ -808,7 +808,44 @@ fn the_bayes_net_plugin_draws_through_the_hosts_diagram() {
         "Sprinkler → Wet grass: strength 0.3",
         "stroke-dasharray",
         "data-bn=",
-        "data-summary=\"Bayesian network: 3 nodes, 2 arcs; evidence: Wet grass = yes;",
+        // #1276: what the evidence did leads the sentence
+        "data-summary=\"Given Wet grass, Rain rose from 50% to 70% and Sprinkler fell from 50% to 40%. Bayesian network: 3 nodes, 2 arcs; evidence: Wet grass = yes;",
+    ] {
+        assert!(svg.contains(want), "{want}: {svg}");
+    }
+}
+
+/// #1276: interactive evidence through the host — the change since the
+/// last click after each bar, an intervention's cut arc and hand, the
+/// active paths on the root, what the evidence did under the graph.
+#[test]
+fn a_bayes_net_draws_evidence_changes_do_and_paths() {
+    let node = |id: &str, label: &str| serde_json::json!({"id": id, "label": label, "kind": "chance", "states": ["yes", "no"]});
+    let b = |n: &str, s: &str, p: f64, q: f64, was: f64| serde_json::json!({"node": n, "state": s, "probability": p, "prior": q, "previous": was});
+    let svg = bayes_net_svg(
+        serde_json::json!([
+            node("cloudy", "Cloudy"),
+            node("sprinkler", "Sprinkler on"),
+            node("rain", "Rain")
+        ]),
+        serde_json::json!({
+            "arcs": [{"from": "cloudy", "to": "sprinkler"}, {"from": "cloudy", "to": "rain"}],
+            "beliefs": [b("cloudy", "yes", 0.5, 0.5, 0.17), b("cloudy", "no", 0.5, 0.5, 0.83),
+                        b("sprinkler", "yes", 1.0, 0.3, 1.0), b("sprinkler", "no", 0.0, 0.7, 0.0),
+                        b("rain", "yes", 0.5, 0.5, 0.3), b("rain", "no", 0.5, 0.5, 0.7)],
+            // the selection's variable as it is: JSON text
+            "evidence": r#"[{"node": "sprinkler", "state": "yes", "mode": "do"}]"#,
+            "paths": [{"path_id": 1, "seq": 1, "from": "cloudy", "to": "rain"}],
+        }),
+    );
+    for want in [
+        ">▲33<",
+        "dp-node-state-delta",
+        "data-cut=\"1\"",
+        "dp-edge-cut",
+        "dp-node-icon",
+        "data-bn-paths=\"[{&quot;id&quot;:&quot;1&quot;,&quot;steps&quot;:[[&quot;cloudy&quot;,&quot;rain&quot;]]}]\"",
+        "data-summary=\"Given Sprinkler on set to yes, no belief moved by more than 2%. The last change moved Cloudy most: from 17% to 50%.",
     ] {
         assert!(svg.contains(want), "{want}: {svg}");
     }

@@ -815,6 +815,31 @@ body.dark .dp-img-row.has-dark .dp-img-missing{display:none}
 .dp-tip-bn .tip-bn-cpt td{border-top:1px solid color-mix(in srgb,var(--ax-muted) 18%,transparent)}
 .dp-tip-bn .tip-bn-heat{background:color-mix(in srgb,var(--bn) var(--p),transparent)}
 .dp-tip-bn .tip-bn-ev{margin:0 0 .2rem}
+/* #1276: interactive evidence — the card's change column, paths line, hint */
+.dp-tip-bn .tip-bn-delta{color:var(--ax-muted);font-size:.68rem}
+.dp-tip-bn .tip-bn-paths{margin:0 0 .2rem;font-weight:600}
+.dp-tip-bn .tip-bn-hint{color:var(--ax-muted);font-size:.7rem}
+/* a node's Markov blanket, the anchored node, the open paths to it */
+.panel svg rect.dp-bn-blanket{stroke:var(--ax-accent);stroke-width:2px}
+.panel svg rect.dp-bn-anchor{stroke:var(--ax-accent);stroke-width:2.4px;stroke-dasharray:5 3}
+.panel svg polyline.dp-bn-path{stroke:var(--ax-accent);stroke-width:3.2px;opacity:1}
+/* the evidence chips above the graph, observe / do */
+.dp-bn-bar .dp-bn-hint{font-size:.74rem;color:var(--ax-muted)}
+.dp-bn-chip .dp-bn-mode{font-size:.68rem;font-weight:700;border:1px solid currentColor;border-radius:999px;padding:0 .4rem;margin-left:.3rem;line-height:1.3;opacity:.85}
+.dp-bn-chip .dp-bn-mode[aria-pressed=true]{background:var(--ax-accent);color:var(--ax-card);border-color:var(--ax-accent)}
+.dp-bn-bar .dp-bn-clear{font-size:.72rem;border:0;background:transparent;color:var(--ax-muted);cursor:pointer;text-decoration:underline;box-shadow:none}
+.dp-bn-evidence-on svg rect[data-bn]{cursor:pointer}
+/* a node's evidence panel (shift-click, Enter) */
+.dp-bn-pop{position:fixed;z-index:60;background:var(--ax-card);color:var(--ax-ink);border:1px solid var(--ax-line);border-radius:10px;box-shadow:var(--ax-pop-shadow);padding:.6rem .7rem;font-size:.8rem;max-width:min(26rem,calc(100vw - 16px))}
+.dp-bn-pop-title{font-weight:700;margin-bottom:.35rem;color:var(--ax-tip-head)}
+.dp-bn-pop table{border-collapse:collapse}
+.dp-bn-pop th,.dp-bn-pop td{padding:.15rem .3rem;text-align:left;white-space:nowrap}
+.dp-bn-pop thead th{font-size:.64rem;color:var(--ax-muted);font-weight:600}
+.dp-bn-pop button{font-size:.74rem;margin-right:.25rem}
+.dp-bn-pop button[aria-pressed=true]{background:var(--ax-accent);color:var(--ax-card)}
+.dp-bn-pop input[type=range]{width:6.5rem;vertical-align:middle}
+.dp-bn-pop output{display:inline-block;width:2.4rem;text-align:right;font-variant-numeric:tabular-nums}
+.dp-bn-pop-foot{margin-top:.45rem;display:flex;gap:.3rem;flex-wrap:wrap}
 .dp-tip .tip-head{font-weight:700;margin-bottom:.35rem;color:var(--ax-tip-head);font-size:.78rem}
 .dp-tip .tip-lines{white-space:pre-line;line-height:1.4;margin:-.2rem 0 .4rem}
 .dp-tip .tip-spark{margin-top:.35rem;line-height:0}.dp-tip .tip-spark svg{width:120px;height:28px}

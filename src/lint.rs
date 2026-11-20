@@ -107,6 +107,8 @@ pub struct Diagnostic {
     /// `figure/unknown-cell` | `figure/duplicate-cell` | `figure/bad-weights`
     /// (errors) | `figure/empty` | `figure/unplaced-cell` |
     /// `figure/stray-end` (warnings).
+    /// `'… evidence'::SELECT_AS` ([`evidence_diags`], #1276):
+    /// `interaction/evidence-no-network` (warning).
     /// `::DIAGRAM_CHECK` ([`diagram_check_diags`], #699):
     /// `diagram_check/no-diagram` (a warning).
     /// `::MARKDOWN_TONE` (#659): `markdown_tone/unknown` (an error) |
@@ -2845,6 +2847,7 @@ where
     diags.extend(step_diags(&plan, script));
     diags.extend(figure_diags(&plan, &figure_cols));
     diags.extend(diagram_check_diags(&plan));
+    diags.extend(evidence_diags(&plan));
     diags.extend(ask_diags(script, &plan));
     script_hints(script, &plan, &mut diags);
     apply_lint_allow(&mut diags, &plan, opts.design);
@@ -2930,6 +2933,54 @@ fn diagram_check_diags(plan: &[sql::Panel]) -> Vec<Diagnostic> {
                 stmt: i + 1,
                 code: "diagram_check/no-diagram",
                 message: "::DIAGRAM_CHECK checks the graph of the editable ::DIAGRAM right after it ('edit'::DIAGRAM_MODE) — there is none, so it never runs".into(),
+                sql: one_line(p.sql.trim()),
+            });
+        }
+    }
+    diags
+}
+
+/// #1276: a `'name evidence'::SELECT_AS` belongs right before a Bayesian
+/// network (`anofox_plot_bayes_net(…)`, or a `::DIAGRAM` with `::BELIEF`;
+/// only layout directives in between), else no click sets the evidence
+/// (`interaction/evidence-no-network`).
+fn evidence_diags(plan: &[sql::Panel]) -> Vec<Diagnostic> {
+    let has = |p: &sql::Panel, r: Role| p.roles.iter().any(|(_, x)| *x == r);
+    let layout = |p: &sql::Panel| {
+        !p.roles.is_empty() && p.roles.iter().all(|(_, r)| r.category() == "layout")
+    };
+    let mut diags = Vec::new();
+    for (i, p) in plan.iter().enumerate() {
+        if p.setup || !has(p, Role::SelectAs) {
+            continue;
+        }
+        let Some(v) = sql::vars::literal_value(p) else {
+            continue;
+        };
+        let evidence = v
+            .split(|c: char| c.is_whitespace() || c == ':' || c == ',')
+            .filter(|w| !w.is_empty())
+            .nth(1)
+            .is_some_and(|m| m.eq_ignore_ascii_case("evidence"));
+        if !evidence {
+            continue;
+        }
+        let next = plan[i + 1..].iter().find(|q| !q.setup && !layout(q));
+        let network = next.is_some_and(|q| {
+            q.contract
+                .as_ref()
+                .is_some_and(|c| c.macro_name == "anofox_plot_bayes_net")
+                || (has(q, Role::Diagram) && has(q, Role::Belief))
+        });
+        if !network {
+            diags.push(Diagnostic {
+                severity: Severity::Warning,
+                stmt: i + 1,
+                code: "interaction/evidence-no-network",
+                message: format!(
+                    "::SELECT_AS `{v}` sets the evidence of the Bayesian network right after it \
+                     (anofox_plot_bayes_net) — there is none, so no click sets it"
+                ),
                 sql: one_line(p.sql.trim()),
             });
         }
@@ -10430,9 +10481,32 @@ mod design_tests {
             sql::vars::select_as_prelude("region").unwrap(),
             "SET VARIABLE region = '';\nSET VARIABLE region_from = NULL;\nSET VARIABLE region_to = NULL;\n"
         );
+        // #1276: a Bayesian network's evidence, as JSON text, and the one before
+        assert_eq!(
+            sql::vars::select_as_prelude("ev evidence").unwrap(),
+            "SET VARIABLE ev = '[]';\nSET VARIABLE ev_prev = '[]';\n"
+        );
         for bad in ["", "1x", "a b c", "region many", "x; DROP"] {
             assert!(sql::vars::select_as_prelude(bad).is_err(), "{bad}");
         }
+    }
+
+    /// #1276: an evidence selection belongs before a Bayesian network.
+    #[test]
+    fn evidence_selection_needs_a_network() {
+        let bad = "SELECT 'ev evidence'::SELECT_AS;\nSELECT 'a'::XAXIS, 1::BARCHART;";
+        let d = check(bad, |_| Ok(vec![]));
+        assert!(has(&d, "interaction/evidence-no-network"), "{d:?}");
+        let ok = "SELECT 'ev evidence'::SELECT_AS;\nSELECT 400::HEIGHT;\n\
+                  SELECT anofox_plot_bayes_net(n) FROM nodes n;";
+        let d = check(ok, |_| Ok(vec![]));
+        assert!(!has(&d, "interaction/evidence-no-network"), "{d:?}");
+        // a plain selection is not evidence
+        let plain = "SELECT 'region'::SELECT_AS;\nSELECT 'a'::XAXIS, 1::BARCHART;";
+        assert!(!has(
+            &check(plain, |_| Ok(vec![])),
+            "interaction/evidence-no-network"
+        ));
     }
 
     #[test]

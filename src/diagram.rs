@@ -136,6 +136,9 @@ pub struct Edge {
     /// Its line width in px (`::EDGES` `width`, #1275), in place of the
     /// width by value.
     pub width: Option<f64>,
+    /// Cut (`::EDGES` `cut`, #1276): its child is set by an intervention,
+    /// so the parent no longer acts on it — drawn grey with a break mark.
+    pub cut: bool,
 }
 
 /// Something the author should know (`dashboard --check`: `diagram/*`).
@@ -254,9 +257,10 @@ impl Belief {
 }
 
 /// A discrete node's belief (#1275, a Bayesian network): `::BELIEF` JSON
-/// `{kind, states: [{state, p, prior, lo, hi}], evidence: {state, mode,
+/// `{kind, states: [{state, p, prior, lo, hi, was}], evidence: {state, mode,
 /// likelihood}, cpt: {parents, states, rows: [{parents, p}]}}`. Only
-/// `states` (with a `state` each) is needed.
+/// `states` (with a `state` each) is needed; `was` (#1276) is the belief
+/// before the evidence last changed.
 #[derive(Clone, Debug)]
 pub struct States {
     /// The node's kind (`chance`, `observed`, `latent`, `decision`,
@@ -278,6 +282,9 @@ pub struct StateRow {
     pub prior: Option<f64>,
     pub lo: Option<f64>,
     pub hi: Option<f64>,
+    /// The belief before the evidence last changed (#1276): its change is
+    /// drawn after the bar.
+    pub was: Option<f64>,
 }
 
 impl States {
@@ -304,6 +311,7 @@ impl States {
                     prior: fnum(r, &["prior"]),
                     lo: fnum(r, &["lo"]),
                     hi: fnum(r, &["hi"]),
+                    was: fnum(r, &["was", "previous"]),
                 })
             })
             .collect();
@@ -329,6 +337,24 @@ impl States {
     /// The observed state (hard evidence, observed or set).
     pub fn observed(&self) -> Option<&str> {
         self.evidence.as_ref().and_then(|e| e.0.as_deref())
+    }
+
+    /// Set by an intervention (`do`, #1276).
+    pub fn intervened(&self) -> bool {
+        self.evidence.as_ref().is_some_and(|e| e.1 == "do")
+    }
+
+    /// Whether any state has a belief from before the last change.
+    fn has_was(&self) -> bool {
+        self.rows.iter().any(|r| r.was.is_some())
+    }
+
+    /// How far the belief moved since the last change (#1276): the
+    /// Jensen–Shannon distance, 0..=1; `None` without every `was`.
+    pub fn moved(&self) -> Option<f64> {
+        let was: Option<Vec<f64>> = self.rows.iter().map(|r| r.was).collect();
+        let now: Vec<f64> = self.rows.iter().map(|r| r.p.unwrap_or(0.0)).collect();
+        Some(ggplot_rs::graph::js_distance(&now, &was?))
     }
 
     /// The most likely state and its belief.
@@ -721,6 +747,7 @@ impl Diagram {
                                 style,
                                 status,
                                 math: field(o, &["math"]).and_then(J::as_bool).unwrap_or(false),
+                                cut: field(o, &["cut"]).and_then(J::as_bool).unwrap_or(false),
                                 steps: edge_steps(field(o, &["steps"])),
                             });
                         }
@@ -792,6 +819,7 @@ impl Diagram {
             steps: edge_steps,
             tip,
             width,
+            cut,
         } in raw
         {
             let (Some(f), Some(t)) = (index(&from, &nodes), index(&to, &nodes)) else {
@@ -820,6 +848,7 @@ impl Diagram {
                     e.math |= math;
                     e.tip = e.tip.take().or(tip);
                     e.width = e.width.or(width);
+                    e.cut |= cut;
                     styles[k] = styles[k].or(style);
                 }
                 None => {
@@ -836,6 +865,7 @@ impl Diagram {
                             math,
                             tip,
                             width,
+                            cut,
                         });
                         styles.push(style);
                     }
@@ -1072,7 +1102,7 @@ fn ordered(mut keys: Vec<(f64, f64, usize)>) -> Vec<usize> {
 /// sparkline) and the layered placement, both ggplot-rs's (#1153, #497).
 fn layout(d: &Diagram) -> Placed {
     use ggplot_rs::graph::{
-        diamond_box, edge_label_width, node_box, node_size, states_box, NodeShape,
+        diamond_box, edge_label_width, node_box, node_size, states_box_with_deltas, NodeShape,
     };
     use ggplot_rs::graph_layout as gl;
     let boxes: Vec<_> = d
@@ -1082,11 +1112,12 @@ fn layout(d: &Diagram) -> Placed {
             (Some(NodeShape::Diamond), _) => diamond_box(&n.label, n.fvalue.as_deref()),
             (Some(shape), _) if !shape.boxed() => node_size(shape, &n.label),
             // #1275: a discrete node's states, a row each
-            (_, Some(st)) => states_box(
+            (_, Some(st)) => states_box_with_deltas(
                 &n.label,
                 n.fvalue.as_deref(),
                 n.badge.as_deref(),
                 &st.rows.iter().map(|r| r.state.clone()).collect::<Vec<_>>(),
+                st.has_was(),
             ),
             _ => node_box(
                 &n.label,
@@ -1159,6 +1190,7 @@ struct RawEdge {
     math: bool,
     tip: Option<String>,
     width: Option<f64>,
+    cut: bool,
     /// Story steps along the edge: (order, caption, against the edge,
     /// iteration).
     steps: Vec<(f64, String, bool, Option<f64>)>,
@@ -1224,7 +1256,10 @@ fn list_names(names: &[String]) -> String {
 /// connections, loops and the largest value.
 fn summary(d: &Diagram, p: &Placed) -> String {
     if d.bayes_net() {
-        return bayes_net_summary(d);
+        return match bn_story(d) {
+            Some(l) => format!("{l} {}", bayes_net_summary(d)),
+            None => bayes_net_summary(d),
+        };
     }
     if d.factor_graph() {
         return match learned(d) {
@@ -1470,6 +1505,117 @@ fn bayes_net_summary(d: &Diagram) -> String {
     parts.join("; ")
 }
 
+/// A state that reads as the node itself ("Rain" for Rain = yes).
+fn yes_like(state: &str) -> bool {
+    matches!(
+        state.to_ascii_lowercase().as_str(),
+        "yes" | "true" | "1" | "present" | "on" | "positive" | "y"
+    )
+}
+
+/// How far a belief has to move to be told (#1276).
+const STORY_MIN: f64 = 0.02;
+
+/// What the evidence did to a Bayesian network (#1276), a line under the
+/// graph and the start of its screen-reader text: "Given Wet grass = yes,
+/// Rain rose from 50% to 71%, Sprinkler on from 30% to 43% and Cloudy from
+/// 50% to 58%." — the (at most three) beliefs that moved most against the
+/// prior; then, when the beliefs before the last change are given and
+/// differ, which one that change moved most. `None` without evidence.
+fn bn_story(d: &Diagram) -> Option<String> {
+    let evidence: Vec<String> = d
+        .nodes
+        .iter()
+        .filter_map(|nd| {
+            let (state, mode) = nd.states.as_ref()?.evidence.as_ref()?;
+            Some(match (state, mode.as_str()) {
+                (Some(s), "do") => format!("{} set to {s}", nd.label),
+                (Some(s), _) if yes_like(s) => nd.label.clone(),
+                (Some(s), _) => format!("{} = {s}", nd.label),
+                (None, _) => format!("soft evidence on {}", nd.label),
+            })
+        })
+        .collect();
+    if evidence.is_empty() {
+        return None;
+    }
+    // the state a node is told by: a yes-like one, else the one that moved most
+    let told =
+        |st: &States, from: &dyn Fn(&StateRow) -> Option<f64>| -> Option<(String, f64, f64)> {
+            let rows: Vec<(&StateRow, f64, f64)> = st
+                .rows
+                .iter()
+                .filter_map(|r| Some((r, from(r)?, r.p?)))
+                .collect();
+            let pick = rows
+                .iter()
+                .find(|(r, _, _)| yes_like(&r.state))
+                .or_else(|| {
+                    rows.iter()
+                        .max_by(|a, b| (a.2 - a.1).total_cmp(&(b.2 - b.1)))
+                })?;
+            Some((pick.0.state.clone(), pick.1, pick.2))
+        };
+    let name = |nd: &Node, state: &str| {
+        if yes_like(state) {
+            nd.label.clone()
+        } else {
+            format!("{} {state}", nd.label)
+        }
+    };
+    let mut moves: Vec<(f64, String)> = d
+        .nodes
+        .iter()
+        .filter_map(|nd| {
+            let st = nd.states.as_ref().filter(|st| st.evidence.is_none())?;
+            let (state, before, now) = told(st, &|r| r.prior)?;
+            ((now - before).abs() >= STORY_MIN).then(|| {
+                let verb = if now > before { "rose" } else { "fell" };
+                (
+                    (now - before).abs(),
+                    format!(
+                        "{} {verb} from {} to {}",
+                        name(nd, &state),
+                        percent(before),
+                        percent(now)
+                    ),
+                )
+            })
+        })
+        .collect();
+    moves.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let moves: Vec<String> = moves.into_iter().take(3).map(|m| m.1).collect();
+    let given = format!("Given {}", list_names(&evidence));
+    let mut out = if moves.is_empty() {
+        format!(
+            "{given}, no belief moved by more than {}.",
+            percent(STORY_MIN)
+        )
+    } else {
+        format!("{given}, {}.", list_names(&moves))
+    };
+    // the last change, when it moved something
+    let last = d
+        .nodes
+        .iter()
+        .filter_map(|nd| {
+            let st = nd.states.as_ref().filter(|st| st.observed().is_none())?;
+            let (state, before, now) = told(st, &|r| r.was)?;
+            ((now - before).abs() >= STORY_MIN)
+                .then(|| ((now - before).abs(), nd, state, before, now))
+        })
+        .max_by(|a, b| a.0.total_cmp(&b.0));
+    if let Some((_, nd, state, before, now)) = last {
+        out.push_str(&format!(
+            " The last change moved {} most: from {} to {}.",
+            name(nd, &state),
+            percent(before),
+            percent(now)
+        ));
+    }
+    Some(out)
+}
+
 /// The steps in reading order, each with its value, status and where it
 /// leads: "1. Ingest (10K) → Build twin, Replay."
 fn steps_text(d: &Diagram, p: &Placed) -> String {
@@ -1593,6 +1739,8 @@ fn draw(d: &Diagram, p: &Placed, pw: u32, ph: u32, o: &RenderOptions) -> String 
             };
             // health first (warn / bad), else a flowing edge in the brand colour
             let colour = match (e.status, e.style) {
+                // #1276: cut by an intervention, grey
+                _ if e.cut => mix(t.colors.card, muted, 0.45),
                 (Some(st @ (Status::Bad | Status::Warn)), _) => st.color(t),
                 (_, EdgeStyle::Flow(_) | EdgeStyle::Dots(_)) => t.color(0),
                 _ => fg.as_ref().map_or(muted, |f| f.line),
@@ -1619,6 +1767,11 @@ fn draw(d: &Diagram, p: &Placed, pw: u32, ph: u32, o: &RenderOptions) -> String 
                 (None, Some(l), _) => format!("{name}: {l}"),
                 (None, None, Some(v)) => format!("{name}: {v}"),
                 _ => name.clone(),
+            };
+            let tooltip = if e.cut {
+                format!("{tooltip} (cut: {} is set by an intervention)", b.label)
+            } else {
+                tooltip
             };
             // #1151: a factor graph's edges are undirected, their label (the
             // interface) at the factor's end
@@ -1660,11 +1813,14 @@ fn draw(d: &Diagram, p: &Placed, pw: u32, ph: u32, o: &RenderOptions) -> String 
                     ),
                     attr("status", e.status.map(|s| s.as_str().to_string())),
                     attr("back", p.back[k].then(|| "1".to_string())),
+                    // #1276: cut by an intervention on its child
+                    attr("cut", e.cut.then(|| "1".to_string())),
                 ],
                 label_attrs: vec![
                     attr("from", Some(a.id.clone())),
                     attr("to", Some(b.id.clone())),
                 ],
+                cut: e.cut,
             }
         })
         .collect();
@@ -1742,6 +1898,10 @@ fn draw(d: &Diagram, p: &Placed, pw: u32, ph: u32, o: &RenderOptions) -> String 
                             prior: r.prior,
                             text: r.p.map(percent).unwrap_or_default(),
                             observed: st.observed() == Some(r.state.as_str()),
+                            // #1276: the change since the evidence last
+                            // changed (not on a node with a state set: the
+                            // click itself)
+                            was: r.was.filter(|_| st.observed().is_none()),
                         })
                         .collect();
                     (rows, t.color(0))
@@ -1751,6 +1911,12 @@ fn draw(d: &Diagram, p: &Placed, pw: u32, ph: u32, o: &RenderOptions) -> String 
                     .as_ref()
                     .filter(|st| st.evidence.is_some() || st.kind.as_deref() == Some("observed"))
                     .map(|_| mix(t.colors.card, t.color(0), 0.16)),
+                // #1276: a hand on a node set by an intervention
+                icon: nd
+                    .states
+                    .as_ref()
+                    .filter(|st| st.intervened())
+                    .map(|_| graph::NodeIcon::Hand),
                 spark: (nd.spark.len() >= 2).then(|| {
                     (
                         nd.spark.clone(),
@@ -1775,6 +1941,15 @@ fn draw(d: &Diagram, p: &Placed, pw: u32, ph: u32, o: &RenderOptions) -> String 
                     // #1275: what the browser's card shows (states, evidence,
                     // the CPT)
                     attr("bn", nd.states.as_ref().map(|st| st.card.clone())),
+                    // #1276: how far its belief moved since the evidence
+                    // last changed (Jensen–Shannon distance)
+                    attr(
+                        "moved",
+                        nd.states
+                            .as_ref()
+                            .and_then(States::moved)
+                            .map(|m| format!("{:.3}", m)),
+                    ),
                 ]
                 .into_iter()
                 // #1152: a factor graph's shaped node has no box for its
@@ -1833,6 +2008,8 @@ fn draw(d: &Diagram, p: &Placed, pw: u32, ph: u32, o: &RenderOptions) -> String 
         heading: t.colors.heading,
         ink: t.colors.ink,
         class_prefix: "dp-".to_string(),
+        // #1276: a node tinted by how far its belief moved
+        moved: d.bayes_net().then(|| t.color(1)),
         ..Default::default()
     };
     // #1172: a factor graph in one hue, its labels as mathematics
@@ -1890,13 +2067,35 @@ pub(crate) fn render(
             d.total_edges
         )
     });
-    // #1172: what the model learned, a line under the graph
-    let lead = d.factor_graph().then(|| learned(d)).flatten();
+    // #1172: what the model learned, a line under the graph; #1276: what
+    // the evidence did to a Bayesian network
+    let lead = d
+        .factor_graph()
+        .then(|| learned(d))
+        .flatten()
+        .or_else(|| d.bayes_net().then(|| bn_story(d)).flatten());
     let note = match (lead, note) {
         (Some(l), Some(n)) => Some(format!("{l} {n}")),
         (l, n) => l.or(n),
     };
-    let note_h = if note.is_some() { 18.0 } else { 0.0 };
+    // wrapped to the width (#1276: what the evidence did runs long), at
+    // most three lines
+    let note_lines: Vec<String> = note
+        .as_deref()
+        .map(|n| {
+            let mut l = ggplot_rs::render::text::wrap_text(n, (w - 24.0).max(60.0), 11.0);
+            if l.len() > 3 {
+                l.truncate(3);
+                l[2].push('…');
+            }
+            l
+        })
+        .unwrap_or_default();
+    let note_h = if note_lines.is_empty() {
+        0.0
+    } else {
+        4.0 + 14.0 * note_lines.len() as f64
+    };
     // the drawing's own canvas: whole px, so a data unit stays a pixel
     let (pw, ph) = (p.w.ceil().max(1.0), p.h.ceil().max(1.0));
     let (aw, ah) = ((w - 4.0).max(10.0), (h - 4.0 - note_h).max(10.0));
@@ -1920,13 +2119,14 @@ pub(crate) fn render(
     ));
     out.push_str(&draw(d, &p, pw as u32, ph as u32, o));
     out.push_str("</g>");
-    if let Some(nt) = note {
+    let n = note_lines.len();
+    for (k, line) in note_lines.iter().enumerate() {
         out.push_str(&format!(
             "<text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\" font-family=\"{font}\" font-size=\"11\" fill=\"{}\">{}</text>",
             w / 2.0,
-            h - 5.0,
+            h - 5.0 - 14.0 * (n - 1 - k) as f64,
             hex(t.chart.note),
-            esc(&nt)
+            esc(line)
         ));
     }
     out.push_str("</svg>");
@@ -2621,7 +2821,7 @@ mod tests {
         ] {
             assert!(svg.contains(want), "{want}");
         }
-        let sum = "Bayesian network: 5 nodes, 3 arcs; evidence: Wet grass = yes; most likely: Rain yes (71%, prior 50%)";
+        let sum = "Given Wet grass, Rain rose from 50% to 71%. Bayesian network: 5 nodes, 3 arcs; evidence: Wet grass = yes; most likely: Rain yes (71%, prior 50%)";
         assert!(
             svg.contains(&format!(r#"data-summary="{sum}""#)),
             "{}",
@@ -2642,6 +2842,95 @@ mod tests {
         assert_ne!(fill_of("grass"), fill_of("rain"));
         // the states without beliefs: names, no bars' percentages
         assert!(svg.contains("data-xtext=\"Either\""));
+    }
+
+    /// #1276: interactive evidence — each state's change since the last
+    /// one (`was`), the node tinted by how far it moved, an intervention's
+    /// hand and its cut incoming arcs, and what the evidence did as a line
+    /// under the graph (and the screen-reader text).
+    #[test]
+    fn a_bayes_net_shows_deltas_do_and_what_changed() {
+        let v = |x: &[&str]| x.iter().map(|y| s(y)).collect::<Vec<_>>();
+        let cols = vec![
+            Column::new(
+                "id",
+                Role::Diagram,
+                v(&["cloudy", "sprinkler", "rain", "grass"]),
+            ),
+            Column::new(
+                "l",
+                Role::Label,
+                v(&["Cloudy", "Sprinkler on", "Rain", "Wet grass"]),
+            ),
+            Column::new(
+                "k",
+                Role::Shape,
+                v(&["chance", "chance", "chance", "chance"]),
+            ),
+            Column::new(
+                "b",
+                Role::Belief,
+                vec![
+                    s(
+                        r#"{"states": [{"state": "yes", "p": 0.5, "prior": 0.5, "was": 0.5}, {"state": "no", "p": 0.5, "prior": 0.5, "was": 0.5}]}"#,
+                    ),
+                    s(
+                        r#"{"states": [{"state": "yes", "p": 1.0, "prior": 0.3, "was": 0.43}, {"state": "no", "p": 0.0, "prior": 0.7, "was": 0.57}], "evidence": {"state": "yes", "mode": "do"}}"#,
+                    ),
+                    s(
+                        r#"{"states": [{"state": "yes", "p": 0.32, "prior": 0.5, "was": 0.71}, {"state": "no", "p": 0.68, "prior": 0.5, "was": 0.29}]}"#,
+                    ),
+                    s(
+                        r#"{"states": [{"state": "yes", "p": 1.0, "prior": 0.65, "was": 1.0}, {"state": "no", "p": 0.0, "prior": 0.35, "was": 0.0}], "evidence": {"state": "yes"}}"#,
+                    ),
+                ],
+            ),
+            Column::new(
+                "e",
+                Role::Edges,
+                vec![
+                    s(
+                        r#"[{"from": "cloudy", "to": "sprinkler", "cut": true}, {"from": "cloudy", "to": "rain"},
+                          {"from": "sprinkler", "to": "grass"}, {"from": "rain", "to": "grass"}]"#,
+                    ),
+                    Value::Na,
+                    Value::Na,
+                    Value::Na,
+                ],
+            ),
+        ];
+        let d = Diagram::from_columns(&cols, &Locale::default()).unwrap();
+        assert!(d.edges[0].cut && !d.edges[1].cut);
+        assert!(d.nodes[1].states.as_ref().unwrap().intervened());
+        let m = d.nodes[2].states.as_ref().unwrap().moved().unwrap();
+        assert!(m > 0.2 && m < 0.5, "{m}");
+        let svg = render_with(&cols, 900, 500, &RenderOptions::default()).unwrap();
+        roxmltree::Document::parse(&svg).expect("well-formed");
+        for want in [
+            ">▼39<",
+            ">▲39<",
+            "dp-node-state-delta",
+            "dp-node-icon",
+            "dp-edge-cut",
+            "data-cut=\"1\"",
+            "data-moved=\"0.",
+            "data-state=\"yes\"",
+            "<title>Cloudy → Sprinkler on (cut: Sprinkler on is set by an intervention)</title>",
+        ] {
+            assert!(svg.contains(want), "{want}");
+        }
+        let story = "Given Sprinkler on set to yes and Wet grass, Rain fell from 50% to 32%. The last change moved Rain most: from 71% to 32%.";
+        assert!(
+            svg.contains(&format!("data-summary=\"{story} Bayesian network")),
+            "{}",
+            &svg[..svg.find('>').unwrap()]
+        );
+        assert!(
+            svg.contains(&format!(">{story}</text>")),
+            "the line under the graph"
+        );
+        // Cloudy did not move: no change shown, not tinted
+        assert!(svg.contains("data-moved=\"0.000\""));
     }
 
     #[test]

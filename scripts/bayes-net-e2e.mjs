@@ -1,13 +1,20 @@
-// #1275: Bayesian networks in a real browser (DuckDB-Wasm, the bayes-net
-// plugin from plugins.json): the example "What does the evidence say about
-// the cause?" draws the sprinkler and the chest clinic top to bottom, each
-// node with a bar per state; the observed node is shaded; hovering a node
-// opens its card (belief against the prior, its conditional probability
-// table as a heat table), hovering an arc names its strength.
+// #1275 / #1276: Bayesian networks in a real browser (DuckDB-Wasm, the
+// bayes-net plugin from plugins.json). The example "What does the evidence
+// say about the cause?" draws the sprinkler and the chest clinic top to
+// bottom, each node with a bar per state; hovering a node opens its card
+// (belief against the prior, its conditional probability table), hovering an
+// arc names its strength (#1275). Then it is queried by clicking (#1276): a
+// click on a state observes it and the SQL recomputes the beliefs (each bar
+// shows its change, the line under the graph says what the evidence did), a
+// second click retracts it, the chip switches it to do() (the incoming arcs
+// cut, a hand on the node), shift-click gives soft evidence; hovering a node
+// lights its Markov blanket, and with a node anchored (a click on its name)
+// the active paths to the hovered one.
 //
 //   scripts/build-wasm-pkg.sh && scripts/web-plugins.sh web
 //   python3 serve_nocache.py 8947 &
-//   NODE_PATH=<dir with playwright>/node_modules node scripts/bayes-net-e2e.mjs [--url http://127.0.0.1:8947/]
+//   NODE_PATH=<dir with playwright>/node_modules node scripts/bayes-net-e2e.mjs [--url http://127.0.0.1:8947/] [--shot out-prefix]
+//   … --page http://127.0.0.1:8095/d/bayes-nets   (served: serve --dashboards <dir> --plugin …)
 import { createRequire } from "module";
 
 const require = createRequire(import.meta.url);
@@ -18,6 +25,8 @@ const arg = (k, d) => {
 };
 const base = arg("--url", "http://127.0.0.1:8947/");
 const shot = arg("--shot", null);
+// a served dashboard instead (serve --dashboards: no SQL crosses the wire)
+const pageUrl = arg("--page", base + "?dashboard=what-does-the-evidence-say-about-the-cause");
 let bad = 0;
 const check = (ok, m, got) => (ok ? console.log("ok   " + m) : (bad++, console.error("FAIL " + m + (got === undefined ? "" : " " + JSON.stringify(got)))));
 
@@ -25,32 +34,85 @@ const browser = await chromium.launch();
 const page = await browser.newPage({ viewport: { width: 1400, height: 1000 } });
 const errors = [];
 page.on("pageerror", (e) => errors.push(String(e)));
-await page.goto(base + "?dashboard=what-does-the-evidence-say-about-the-cause");
+await page.goto(pageUrl);
 await page.waitForFunction(() => document.querySelectorAll("svg[data-diagram]").length >= 2, null, { timeout: 120000 });
 await page.waitForTimeout(500);
 
+// the networks: 0 the sprinkler, 1 the chest clinic
+const net = (k) => page.locator(".panel:has(svg[data-diagram])").nth(k);
+// the centre of a node's state row (its name), or of its label
+async function rowAt(k, node, state) {
+  return page.evaluate(
+    ([k, node, state]) => {
+      const svg = document.querySelectorAll("svg[data-diagram]")[k];
+      const t = state == null ? svg.querySelector(`[data-of="${node}"] text.dp-node-label`) : svg.querySelector(`[data-of="${node}"] text[data-state="${state}"]`);
+      if (!t) return null;
+      // on screen first (the chest clinic is below the fold)
+      const b = t.getBoundingClientRect();
+      if (b.top < 60 || b.bottom > innerHeight - 60) t.scrollIntoView({ block: "center" });
+      const r = t.getBoundingClientRect();
+      return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    },
+    [k, node, state]
+  );
+}
+// click, then wait for the re-run to draw the network again
+async function clickAt(p, opts = {}) {
+  const before = await page.evaluate(() => [...document.querySelectorAll("svg[data-diagram]")].map((s) => s.getAttribute("data-summary")).join("|"));
+  if (opts.shift) await page.keyboard.down("Shift");
+  if (opts.alt) await page.keyboard.down("Alt");
+  await page.mouse.click(p.x, p.y);
+  if (opts.shift) await page.keyboard.up("Shift");
+  if (opts.alt) await page.keyboard.up("Alt");
+  if (opts.rerun === false) return;
+  await page
+    .waitForFunction((b) => [...document.querySelectorAll("svg[data-diagram]")].map((s) => s.getAttribute("data-summary")).join("|") !== b, before, { timeout: 30000 })
+    .catch(() => {});
+  await page.waitForTimeout(300);
+}
+const state = (k) =>
+  page.evaluate((k) => {
+    const svg = document.querySelectorAll("svg[data-diagram]")[k];
+    const panel = svg.closest(".panel");
+    const vals = {};
+    for (const t of svg.querySelectorAll("text.dp-node-state-value[data-state]")) {
+      const of = t.closest("[data-of]")?.getAttribute("data-of");
+      vals[of + "." + t.getAttribute("data-state")] = t.textContent;
+    }
+    return {
+      summary: svg.getAttribute("data-summary") || "",
+      vals,
+      deltas: [...svg.querySelectorAll(".dp-node-state-delta text, text.dp-node-state-delta")].map((t) => t.closest("[data-of]")?.getAttribute("data-of") + ":" + t.textContent),
+      chips: [...panel.querySelectorAll(".dp-bn-chip")].map((c) => c.firstChild.textContent),
+      hint: !!panel.querySelector(".dp-bn-hint"),
+      cut: [...svg.querySelectorAll('polyline[data-cut="1"]')].map((e) => e.getAttribute("data-edge")),
+      cutMark: !!svg.querySelector(".dp-edge-cut"),
+      hand: !!svg.querySelector(".dp-node-icon"),
+      moved: Object.fromEntries([...svg.querySelectorAll("rect[data-moved]")].map((r) => [r.getAttribute("data-node"), +r.getAttribute("data-moved")])),
+      fill: Object.fromEntries([...svg.querySelectorAll("rect[data-node]")].map((r) => [r.getAttribute("data-node"), r.getAttribute("fill")])),
+    };
+  }, k);
+
+// ---- #1275: the drawing, the card, the arc's hover text -------------------
 const drawn = await page.evaluate(() => {
   const [sp, asia] = document.querySelectorAll("svg[data-diagram]");
-  const grass = sp.querySelector('rect[data-node="grass"]');
   return {
     dir: sp.getAttribute("data-diagram"),
     nodes: sp.querySelectorAll("rect[data-node]").length,
     bars: sp.querySelectorAll("rect.dp-node-state-bar").length,
     summary: sp.getAttribute("data-summary") || "",
-    grassFill: grass?.getAttribute("fill"),
-    cloudyFill: sp.querySelector('rect[data-node="cloudy"]')?.getAttribute("fill"),
     double: !!asia.querySelector('rect[data-node="either"].dp-node-double-box'),
     dashed: asia.querySelector('polyline[data-edge="asia>tub"]')?.getAttribute("stroke-dasharray") || "",
   };
 });
 check(drawn.dir === "TB" && drawn.nodes === 4, "the sprinkler: four nodes, top to bottom", drawn);
 check(drawn.bars === 8, "a bar per state", drawn);
-check(/^Bayesian network: 4 nodes, 4 arcs; evidence: Wet grass = yes; most likely: /.test(drawn.summary), "its summary names the evidence", drawn.summary);
-check(drawn.grassFill && drawn.grassFill !== drawn.cloudyFill, "the observed node is shaded", drawn);
+check(/^Bayesian network: 4 nodes, 4 arcs; most likely: /.test(drawn.summary), "no evidence yet: its summary", drawn.summary);
 check(drawn.double, "TB or cancer has a double outline");
 check(drawn.dashed !== "", "the weak arc from Visited Asia is dashed", drawn);
+let s0 = await state(0);
+check(s0.hint && !s0.chips.length, "no evidence: a hint, no chips", s0);
 
-// a node's card: kind, belief vs prior, the table
 await page.locator('svg[data-diagram] rect[data-node="rain"]').first().hover();
 await page.waitForTimeout(200);
 const card = await page.evaluate(() => {
@@ -62,26 +124,159 @@ const card = await page.evaluate(() => {
         title: t.querySelector(".tip-card-title")?.textContent,
         states: [...t.querySelectorAll(".tip-bn-states tbody tr")].map((r) => [...r.children].map((c) => c.textContent.trim()).join(" ")),
         cpt: [...t.querySelectorAll(".tip-bn-cpt tr")].map((r) => [...r.children].map((c) => c.textContent.trim()).join(" ")),
+        hint: t.querySelector(".tip-bn-hint")?.textContent || "",
       }
     : null;
 });
 check(card && card.bn && card.kicker === "Chance node" && card.title === "Rain", "hovering Rain opens its card", card);
-check(card && card.states[0] === "yes  71% 50%", "its belief against the prior", card?.states);
+check(card && card.states[0] === "yes  50% 50%", "its belief against the prior", card?.states);
 check(card && card.cpt[0] === "Cloudy yes no" && card.cpt[1] === "yes 0.8 0.2", "its table, by Cloudy", card?.cpt);
-if (shot) await page.screenshot({ path: shot });
+check(card && /Click a state to observe it/.test(card.hint), "the card says what a click does", card?.hint);
 
-await page.locator('svg[data-diagram] rect[data-node="grass"]').first().hover();
-await page.waitForTimeout(200);
-const ev = await page.evaluate(() => document.querySelector(".dp-tip.show .tip-bn-ev")?.textContent);
-check(ev === "Observed: yes.", "the observed node's card says so", ev);
+// #1276: the Markov blanket of Rain — Cloudy (parent), Wet grass (child),
+// Sprinkler on (the child's other parent) — lit while hovered
+const blanket = await page.evaluate(() =>
+  [...document.querySelectorAll("svg[data-diagram]")[0].querySelectorAll("rect.dp-bn-blanket")].map((r) => r.getAttribute("data-node")).sort()
+);
+check(JSON.stringify(blanket) === JSON.stringify(["cloudy", "grass", "sprinkler"]), "hovering Rain lights its Markov blanket", blanket);
 
-// an arc's hover text: its strength
 const arc = await page.evaluate(() => {
   const asia = document.querySelectorAll("svg[data-diagram]")[1];
   const e = asia.querySelector('polyline[data-edge="smoke>lung"]');
   return e?.querySelector("title")?.textContent || e?.getAttribute("data-tip") || "";
 });
 check(/Smoker → Lung cancer: strength 1/.test(arc), "an arc names its strength on hover", arc);
+await page.mouse.move(5, 5);
+
+// ---- #1276: observe, the change, retract ----------------------------------
+await clickAt(await rowAt(0, "grass", "yes"));
+let s1 = await state(0);
+check(s1.chips.join("|") === "Wet grass = yes", "a click on Wet grass = yes observes it (a chip)", s1.chips);
+check(s1.vals["rain.yes"] === "71%" && s1.vals["sprinkler.yes"] === "43%" && s1.vals["cloudy.yes"] === "58%", "the SQL recomputes the beliefs", s1.vals);
+check(s1.deltas.includes("rain:▲21") && s1.deltas.includes("sprinkler:▲13"), "each bar shows its change", s1.deltas);
+check(!s1.deltas.some((d) => d.startsWith("grass:")), "…not the observed node's own", s1.deltas);
+check(s1.moved.rain > 0.1 && s1.fill.rain !== s0.fill.rain && s1.fill.grass !== s0.fill.grass, "Rain tinted by how far it moved, Wet grass shaded", { moved: s1.moved, fill: s1.fill });
+check(/^Given Wet grass, Rain rose from 50% to 71%, Sprinkler on rose from 30% to 43% and Cloudy rose from 50% to 58%\./.test(s1.summary), "the summary says what the evidence did", s1.summary);
+const under = await page.evaluate(() => [...document.querySelectorAll("svg[data-diagram]")[0].querySelectorAll(":scope > text")].map((t) => t.textContent).join(" "));
+check(/^Given Wet grass, Rain rose from 50% to 71%/.test(under), "…also as a line under the graph", under);
+check(/v\.sprinkler_ev=/.test(page.url()), "the evidence is in the address", page.url());
+const quiet = async (k) => {
+  await net(k).evaluate((el) => window.scrollTo(0, el.getBoundingClientRect().top + window.scrollY - 120));
+  const b = await net(k).boundingBox();
+  await page.mouse.move(b.x + 6, b.y + b.height - 6);
+  await page.waitForTimeout(300);
+};
+if (shot) await quiet(0), await net(0).screenshot({ path: shot + "-observe.png" });
+
+// explaining away: rain observed too, the sprinkler falls back
+await clickAt(await rowAt(0, "rain", "yes"));
+let s2 = await state(0);
+check(s2.vals["sprinkler.yes"] === "19%" && s2.deltas.includes("sprinkler:▼24"), "rain explains the wet grass away", { vals: s2.vals, deltas: s2.deltas });
+check(/The last change moved Sprinkler on most: from 43% to 19%\./.test(s2.summary), "…and the summary names the last change", s2.summary);
+// a second click retracts
+await clickAt(await rowAt(0, "rain", "yes"));
+let s3 = await state(0);
+check(s3.chips.join("|") === "Wet grass = yes" && s3.vals["sprinkler.yes"] === "43%", "a second click retracts it", { chips: s3.chips, vals: s3.vals });
+
+// ---- do(): seeing against doing --------------------------------------------
+await net(0).locator(".dp-bn-chip").first().locator("button[aria-label^='Retract']").click();
+await page.waitForTimeout(800);
+await clickAt(await rowAt(0, "sprinkler", "yes"));
+let s4 = await state(0);
+check(s4.vals["cloudy.yes"] === "17%", "seeing the sprinkler on: a cloudy sky unlikely", s4.vals);
+const before = s4.summary;
+await net(0).locator(".dp-bn-chip .dp-bn-mode").click();
+await page.waitForFunction((b) => document.querySelectorAll("svg[data-diagram]")[0].getAttribute("data-summary") !== b, before, { timeout: 30000 });
+await page.waitForTimeout(300);
+let s5 = await state(0);
+check(s5.vals["cloudy.yes"] === "50%", "doing it: Cloudy back at 50%", s5.vals);
+check(JSON.stringify(s5.cut) === JSON.stringify(["cloudy>sprinkler"]) && s5.cutMark, "its incoming arc is cut, with a break mark", s5);
+check(s5.hand, "the set node shows a hand", s5);
+check(/^Given Sprinkler on set to yes, /.test(s5.summary), "the summary says it was set", s5.summary);
+const modeBtn = await net(0).locator(".dp-bn-chip .dp-bn-mode").getAttribute("aria-pressed");
+check(modeBtn === "true", "the chip shows do", modeBtn);
+if (shot) await quiet(0), await net(0).screenshot({ path: shot + "-do.png" });
+
+// ---- soft evidence: shift-click, a likelihood per state ---------------------
+await net(0).locator(".dp-bn-chip").first().locator("button[aria-label^='Retract']").click();
+await page.waitForTimeout(800);
+await clickAt(await rowAt(0, "grass", null), { shift: true, rerun: false });
+await page.waitForSelector(".dp-bn-pop", { timeout: 5000 }).catch(() => {});
+const pop = await page.evaluate(() => {
+  const p = document.querySelector(".dp-bn-pop");
+  return p ? { title: p.querySelector(".dp-bn-pop-title")?.textContent, sliders: p.querySelectorAll("input[type=range]").length } : null;
+});
+check(pop && pop.title === "Evidence on Wet grass" && pop.sliders === 2, "shift-click opens the evidence panel", pop);
+if (pop) {
+  await page.evaluate(() => {
+    const [a, b] = document.querySelectorAll(".dp-bn-pop input[type=range]");
+    a.value = "0.8";
+    b.value = "0.2";
+  });
+  const was = await page.evaluate(() => document.querySelectorAll("svg[data-diagram]")[0].getAttribute("data-summary"));
+  await page.click(".dp-bn-pop button[data-act=soft]");
+  await page.waitForFunction((b) => document.querySelectorAll("svg[data-diagram]")[0].getAttribute("data-summary") !== b, was, { timeout: 30000 }).catch(() => {});
+  await page.waitForTimeout(300);
+  const s6 = await state(0);
+  check(s6.chips.join("|") === "Wet grass: soft (yes 0.8, no 0.2)" && s6.vals["rain.yes"] === "64%", "soft evidence: a likelihood per state", { chips: s6.chips, vals: s6.vals });
+}
+
+// the keyboard: Enter on a focused node opens its evidence panel, Esc closes it
+await page.locator('svg[data-diagram] rect[data-node="rain"]').first().focus();
+await page.keyboard.press("Enter");
+await page.waitForSelector(".dp-bn-pop", { timeout: 5000 }).catch(() => {});
+const kbd = await page.evaluate(() => document.querySelector(".dp-bn-pop .dp-bn-pop-title")?.textContent || "");
+await page.keyboard.press("Escape");
+await page.waitForTimeout(200);
+const closed = await page.evaluate(() => !document.querySelector(".dp-bn-pop"));
+check(kbd === "Evidence on Rain" && closed, "Enter on a focused node opens its evidence panel, Esc closes it", { kbd, closed });
+await page.evaluate(() => document.activeElement?.blur?.());
+
+// ---- active paths in the chest clinic --------------------------------------
+await clickAt(await rowAt(1, "asia", null), { rerun: false });
+await page.waitForTimeout(200);
+const anchored = await page.evaluate(() => !!document.querySelectorAll("svg[data-diagram]")[1].querySelector('rect[data-node="asia"].dp-bn-anchor'));
+check(anchored, "a click on Visited Asia's name anchors it");
+const hoverSmoke = async () => {
+  await page.mouse.move(5, 5);
+  const p = await rowAt(1, "smoke", null);
+  await page.mouse.move(p.x, p.y);
+  await page.waitForTimeout(250);
+  return page.evaluate(() => ({
+    path: [...document.querySelectorAll("svg[data-diagram]")[1].querySelectorAll("polyline.dp-bn-path")].map((e) => e.getAttribute("data-edge")).sort(),
+    note: document.querySelector(".dp-tip.show .tip-bn-paths")?.textContent || "",
+  }));
+};
+let h = await hoverSmoke();
+check(!h.path.length && /^Independent of Visited Asia given the evidence/.test(h.note), "no evidence: Smoker independent of Visited Asia", h);
+await page.mouse.move(5, 5);
+await clickAt(await rowAt(1, "xray", "yes"));
+h = await hoverSmoke();
+check(
+  JSON.stringify(h.path) === JSON.stringify(["asia>tub", "either>xray", "lung>either", "smoke>lung", "tub>either"].filter((e) => e !== "either>xray")) &&
+    /^1 open path to Visited Asia/.test(h.note),
+  "an abnormal X-ray opens the path through TB or cancer",
+  h
+);
+await page.mouse.move(5, 5);
+await page.waitForTimeout(200);
+if (shot) {
+  // each network on its own, light and dark
+  for (const scheme of ["light", "dark"]) {
+    await page.emulateMedia({ colorScheme: scheme });
+    await page.waitForTimeout(600);
+    for (const k of [0, 1]) {
+      // the pointer in the panel's empty corner: no hover card
+      // clear of the sticky app bar, no node focused (a focused node shows its card)
+      await page.evaluate(() => document.activeElement?.blur?.());
+      await net(k).evaluate((el) => window.scrollTo(0, el.getBoundingClientRect().top + window.scrollY - 120));
+      const b = await net(k).boundingBox();
+      await page.mouse.move(b.x + 6, b.y + b.height - 6);
+      await page.waitForTimeout(300);
+      await net(k).screenshot({ path: `${shot}-${scheme}-${k ? "asia" : "sprinkler"}.png` });
+    }
+  }
+}
 
 check(!errors.length, "no page errors", errors);
 await browser.close();

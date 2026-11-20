@@ -4658,6 +4658,7 @@ function dashStateReset() {
   dpZoomGroups = {};
   dpFrameGroups = {};
   dpXf = {};
+  dpEvPrev = {};
   dpUrlSeed = {};
   dpVarDefault = {};
   dpPeriodUrl = {};
@@ -4690,6 +4691,7 @@ function dashStateSave() {
     dpSelected,
     dpZoomGroups: { ...dpZoomGroups },
     dpXf: { ...dpXf },
+    dpEvPrev: { ...dpEvPrev },
     dpUrlSeed: { ...dpUrlSeed },
     dpVarDefault: { ...dpVarDefault },
     dpPeriodUrl: { ...dpPeriodUrl },
@@ -4711,6 +4713,7 @@ function dashStateRestore(saved) {
   dpViewDefault = saved.dpViewDefault;
   dpZoomGroups = saved.dpZoomGroups;
   dpXf = saved.dpXf;
+  dpEvPrev = saved.dpEvPrev || {};
   dpUrlSeed = saved.dpUrlSeed;
   dpVarDefault = saved.dpVarDefault;
   dpPeriodUrl = saved.dpPeriodUrl;
@@ -8361,6 +8364,10 @@ let dpCols = 2; // default panels-per-row on the 12-column grid
 let dpFilter = ""; // generic cross-filter: last clicked value, as getvariable('selected')
 let dpZoomGroups = {}; // ::SYNC_ZOOM: group name → {view: {cx, cy, w} | null, members: Set<map holder>}
 let dpXf = {}; // named cross-filters: column-name -> value, each getvariable('<name>')
+// #1276: a Bayesian network's evidence selection ('name evidence'::SELECT_AS)
+// -> its evidence before the last change (JSON text), getvariable('<name>_prev');
+// its current evidence is dpXf[name] (JSON text, '[]' = none)
+let dpEvPrev = {};
 let dpPage = {}; // ::PAGED tables: statement index -> current page (server-side)
 let dpSort = {}; // ::PAGED tables: statement index -> {col, dir} (server-side sort)
 let dpKbdActive = false; // one-shot: keep row highlight after a server page-change
@@ -8783,6 +8790,8 @@ async function setSelectionVars() {
         await runSql(`SET VARIABLE ${k} = ${lit}`);
       }
     }
+    // #1276: the evidence before the last change
+    for (const [k, v] of Object.entries(dpEvPrev)) if (URL_VAR_RE.test(k + "_prev")) await runSql(`SET VARIABLE ${k}_prev = ${q(v)}`);
   } catch (e) {
     /* ignore */
   }
@@ -8805,6 +8814,7 @@ function urlStateParams() {
   if (dpFilter) add("selected", dpFilter);
   for (const [k, v] of Object.entries(dpXf)) {
     if (k in dpVarDefault || v == null || v === "" || (Array.isArray(v) && !v.length)) continue;
+    if (k in dpEvPrev && v === "[]") continue; // #1276: no evidence
     add(k, v);
   }
   for (const [k, r] of Object.entries(dpRange)) {
@@ -8916,7 +8926,7 @@ let dpRange = {}; // named selection -> {from, to} brushed x range (numbers or I
 function parseSelectAs(v) {
   const m = String(v ?? "")
     .trim()
-    .match(/^([A-Za-z_][A-Za-z0-9_]{0,59})(?:\s*[\s:,]\s*(single|multi))?$/i);
+    .match(/^([A-Za-z_][A-Za-z0-9_]{0,59})(?:\s*[\s:,]\s*(single|multi|evidence))?$/i);
   return m ? { name: m[1], mode: (m[2] || "single").toLowerCase() } : null;
 }
 // Evaluate the interaction directives before any panel queries, so their
@@ -8939,6 +8949,10 @@ async function prepInteractions(stmts) {
       const sel = parseSelectAs(rows[0] ? Object.values(rows[0])[0] : "");
       if (!sel) continue;
       dpIa[i] = { select: sel };
+      if (sel.mode === "evidence") {
+        seedEvidence(sel);
+        continue;
+      }
       seedNamedSelection(sel);
       const cur = dpXf[sel.name];
       if (sel.mode === "multi" && !Array.isArray(cur)) dpXf[sel.name] = cur ? [cur] : [];
@@ -8946,6 +8960,22 @@ async function prepInteractions(stmts) {
       dpRange[sel.name] ||= null;
     } catch (_) {}
   }
+}
+// #1276: an evidence selection's value — from the URL (`?v.<name>=[…]`),
+// else what it was, else none — always a JSON list; before the first change
+// the evidence "before" is the same (no change to show).
+function seedEvidence(sel) {
+  const v = dpUrlSeed[sel.name];
+  delete dpUrlSeed[sel.name];
+  let cur = typeof dpXf[sel.name] === "string" ? dpXf[sel.name] : "[]";
+  if (v && v[0] && v[0].length <= 4000) cur = v[0];
+  try {
+    if (!Array.isArray(JSON.parse(cur))) cur = "[]";
+  } catch (_) {
+    cur = "[]";
+  }
+  dpXf[sel.name] = cur;
+  if (!(sel.name in dpEvPrev)) dpEvPrev[sel.name] = cur;
 }
 function seedNamedSelection(sel) {
   const take = (k) => {
@@ -9385,12 +9415,13 @@ const xVal = (x, kind) => (kind === "num" ? Number(x) : x);
 // Clear every click / brush selection (Esc, a click on empty space). Returns
 // true if there was anything to clear.
 function clearSelections() {
-  const anyNamed = Object.values(dpXf).some((v) => (Array.isArray(v) ? v.length : v));
+  // #1276: Esc keeps a network's evidence (its chips clear it)
+  const anyNamed = Object.entries(dpXf).some(([k, v]) => !(k in dpEvPrev) && (Array.isArray(v) ? v.length : v));
   const anyRange = Object.values(dpRange).some((r) => r);
   if (!dpFilter && dpSelected === null && !anyNamed && !anyRange) return false;
   dpFilter = "";
   dpSelected = null;
-  for (const k in dpXf) dpXf[k] = Array.isArray(dpXf[k]) ? [] : "";
+  for (const k in dpXf) if (!(k in dpEvPrev)) dpXf[k] = Array.isArray(dpXf[k]) ? [] : "";
   for (const k in dpRange) dpRange[k] = null;
   return true;
 }
@@ -9412,6 +9443,7 @@ function decorateSelections() {
     const sel = panel._ia && panel._ia.select;
     if (!sel) return;
     panel.classList.add("dp-selectable");
+    if (sel.mode === "evidence") return decorateEvidence(panel, sel); // #1276
     const cur = dpXf[sel.name];
     const keys = new Set(Array.isArray(cur) ? cur : cur ? [cur] : []);
     const r = dpRange[sel.name];
@@ -21555,6 +21587,7 @@ function attachHover() {
         if (hoverFocusOn(svg)) hoverFocus(svg, series);
       }
       if (!isMapMark && !(Date.now() - dpTouchAt < 1000) && isFactorGraph(rootSvg(el))) fgFocus(rootSvg(el), el);
+      if (!isMapMark && !(Date.now() - dpTouchAt < 1000) && isBayesNet(rootSvg(el))) bnFocus(rootSvg(el), el); // #1276
       // The crosshair shows the tooltip — except for a mark focused from the
       // keyboard (a11y), which has no pointer to drive the crosshair.
       if (pointered() && document.activeElement !== el) return;
@@ -21586,6 +21619,7 @@ function attachHover() {
       if (isMapMark) mapHoverEmph(null);
       else if (!rule && rootSvg(el)._dpHf) hoverFocus(rootSvg(el), null);
       if (!isMapMark && isFactorGraph(rootSvg(el))) fgFocus(rootSvg(el), null);
+      if (!isMapMark && isBayesNet(rootSvg(el))) bnFocus(rootSvg(el), null); // #1276
       if (isMapMark && dpTipMark && dpTipMark.x === el.getAttribute("data-x")) dpTipMark = null;
       if (pointered()) return;
       tip.classList.remove("show");
@@ -21616,6 +21650,8 @@ function attachHover() {
       // The mark's own value — its x (a drill level is the x), else its series;
       // on a ::REGION map, the clicked region's code (#954: the next level
       // filters on the code, never on a shown, translated name).
+      // #1276: a Bayesian network's state observes it, its name anchors paths
+      if (!trackSvg && ia && ia.select && ia.select.mode === "evidence" && bnClick(el, e, ia.select)) return;
       const dx = el.getAttribute("data-x");
       const key = dx ? String(dx) : (regionCodeOf(el) ?? series);
       if (!trackSvg && ia && ia.drill && drillInto(ia.drill, key)) return;
@@ -22205,6 +22241,11 @@ function bnPercent(p) {
   p = Math.min(1, Math.max(0, p));
   return p > 0 && p < 0.005 ? "<1%" : p < 1 && p > 0.995 ? ">99%" : Math.round(p * 100) + "%";
 }
+function bnDelta(r) {
+  const d = r.p - r.was;
+  if (!Number.isFinite(d) || Math.abs(d) < 0.005) return "";
+  return (d > 0 ? "▲" : "▼") + Math.max(1, Math.round(Math.abs(d) * 100));
+}
 function bnCard(el) {
   let bn = null;
   try {
@@ -22224,6 +22265,8 @@ function bnCard(el) {
   else if (ev && ev.state != null) evText = `Observed: ${ev.state}.`;
   else if (ev && ev.likelihood) evText = "Soft evidence: likelihood " + Object.entries(ev.likelihood).map(([s, l]) => `${s} ${l}`).join(", ") + ".";
   const hasPrior = bn.states.some((r) => r.prior != null);
+  // #1276: the change since the evidence last changed
+  const hasWas = bn.states.some((r) => r.was != null && r.p != null && Math.abs(r.p - r.was) >= 0.005);
   const rows = bn.states
     .map((r) => {
       const p = r.p != null ? Math.min(1, Math.max(0, r.p)) : null;
@@ -22236,11 +22279,23 @@ function bnCard(el) {
         `<td class="tip-bn-bar"><span class="tip-bn-track">${pr != null ? `<span class="tip-bn-prior" style="width:${pr.toFixed(1)}%"></span>` : ""}<span class="tip-bn-fill" style="width:${w.toFixed(1)}%;background:${escapeHtml(colour)}"></span></span></td>` +
         `<td class="tip-bn-num">${escapeHtml(bnPercent(p))}${range}</td>` +
         (hasPrior ? `<td class="tip-bn-num tip-bn-was">${escapeHtml(bnPercent(r.prior))}</td>` : "") +
+        (hasWas ? `<td class="tip-bn-num tip-bn-delta">${escapeHtml(bnDelta(r))}</td>` : "") +
         "</tr>"
       );
     })
     .join("");
-  const beliefs = `<table class="tip-bn-states"><thead><tr><th></th><th></th><th>belief</th>${hasPrior ? "<th>prior</th>" : ""}</tr></thead><tbody>${rows}</tbody></table>`;
+  const beliefs = `<table class="tip-bn-states"><thead><tr><th></th><th></th><th>belief</th>${hasPrior ? "<th>prior</th>" : ""}${hasWas ? "<th>last change</th>" : ""}</tr></thead><tbody>${rows}</tbody></table>`;
+  // #1276: the open paths to the anchored node; what a click does
+  let paths = "";
+  const anchor = svg && isBayesNet(svg) ? bnAnchorOf(svg) : null;
+  if (anchor === id) paths = "Anchored: hover another node for the paths to it that the evidence leaves open.";
+  else if (anchor) {
+    const ps = bnPathsBetween(svg, anchor, id);
+    const other = bnLabel(svg, anchor);
+    if (ps) paths = ps.length ? `${ps.length} open path${ps.length === 1 ? "" : "s"} to ${other} given the evidence.` : `Independent of ${other} given the evidence: no open path.`;
+  }
+  const evMode = el.closest(".panel")?._ia?.select?.mode === "evidence";
+  const hint = evMode ? "Click a state to observe it (again: retract), alt-click to set it (do), shift-click for soft evidence; click the name to anchor it." : "";
   let table = "";
   const cpt = bn.cpt;
   if (cpt && Array.isArray(cpt.rows) && cpt.rows.length) {
@@ -22272,8 +22327,311 @@ function bnCard(el) {
     card: true,
     bn: true,
     head: `<div class="tip-kicker">${escapeHtml(kicker)}</div><div class="tip-card-title">${escapeHtml(el.getAttribute("data-xtext") || id)}</div>`,
-    body: (evText ? `<p class="tip-note tip-bn-ev">${escapeHtml(evText)}</p>` : "") + beliefs + table,
+    body:
+      (evText ? `<p class="tip-note tip-bn-ev">${escapeHtml(evText)}</p>` : "") +
+      (paths ? `<p class="tip-note tip-bn-paths">${escapeHtml(paths)}</p>` : "") +
+      beliefs +
+      table +
+      (hint ? `<p class="tip-note tip-bn-hint">${escapeHtml(hint)}</p>` : ""),
   };
+}
+
+// ---- #1276: a Bayesian network's interactive evidence ----
+// `'name evidence'::SELECT_AS` before anofox_plot_bayes_net: a click on a
+// state row observes that state (again: retracts it), alt-click sets it
+// (do), shift-click (or Enter on a focused node) opens the node's evidence
+// panel (observe / set / a likelihood per state). getvariable('<name>') is
+// the evidence as JSON text, a list of {node, state[, likelihood][, mode]};
+// getvariable('<name>_prev') the evidence before the last change. A chip
+// per node above the graph toggles observe / do and retracts it. A click on
+// a node's name anchors it: hovering another node then lights the active
+// paths between them (the producer's `paths`, data-bn-paths on the root).
+// Hovering a node lights its Markov blanket.
+const isBayesNet = (svg) => {
+  if (!svg || !svg.hasAttribute?.("data-diagram")) return false;
+  if (svg._dpBn === undefined) svg._dpBn = !!svg.querySelector("[data-bn]") && !isFactorGraph(svg);
+  return svg._dpBn;
+};
+const dpBnAnchor = {}; // panel data-stmt -> the anchored node id
+function bnEvidence(sel) {
+  try {
+    const v = JSON.parse(dpXf[sel.name] || "[]");
+    return Array.isArray(v) ? v.filter((o) => o && typeof o.node === "string" && typeof o.state === "string") : [];
+  } catch (_) {
+    return [];
+  }
+}
+function bnSetEvidence(sel, items) {
+  dpEvPrev[sel.name] = dpXf[sel.name] || "[]";
+  dpXf[sel.name] = JSON.stringify(items);
+  run(false);
+}
+// Observe (or, with mode "do", set) `state` of `node`; the same again retracts.
+function bnToggle(sel, node, state, mode) {
+  const items = bnEvidence(sel);
+  const rest = items.filter((i) => i.node !== node);
+  const mine = items.filter((i) => i.node === node);
+  const hard = mine.length === 1 && mine[0].likelihood == null ? mine[0] : null;
+  const was = hard ? (hard.mode === "do" ? "do" : "observe") : null;
+  if (hard && hard.state === state && (!mode || mode === was)) return bnSetEvidence(sel, rest);
+  const it = { node, state };
+  if ((mode || was) === "do") it.mode = "do";
+  bnSetEvidence(sel, [...rest, it]);
+}
+const bnLabel = (svg, id) => svg?.querySelector(`rect[data-node="${CSS.escape(id)}"]`)?.getAttribute("data-xtext") || id;
+// The state row under client y in node `id`'s box (its name and value carry
+// data-state), or null (the label above the rows).
+function bnRowAt(svg, id, y) {
+  let best = null;
+  for (const t of svg.querySelectorAll(`[data-of="${CSS.escape(id)}"] text[data-state]`)) {
+    const r = t.getBoundingClientRect();
+    const d = Math.abs(r.top + r.height / 2 - y);
+    if (!best || d < best.d) best = { d, h: r.height, state: t.getAttribute("data-state") };
+  }
+  return best && best.d <= Math.max(6, best.h * 0.75) ? best.state : null;
+}
+function bnClick(el, e, sel) {
+  const id = el.getAttribute("data-node");
+  const svg = rootSvg(el);
+  if (id == null || !el.hasAttribute("data-bn") || !svg) return false;
+  // Enter on a focused node (no pointer) or shift-click: the evidence panel
+  if (e.shiftKey || (!e.isTrusted && !e.clientX && !e.clientY)) {
+    bnPanel(sel, el);
+    return true;
+  }
+  const state = bnRowAt(svg, id, e.clientY);
+  if (state != null) {
+    bnToggle(sel, id, state, e.altKey ? "do" : null);
+    return true;
+  }
+  // the name: anchor (again: release) the node for the active paths
+  const stmt = svg.closest(".panel[data-stmt]")?.dataset.stmt ?? "";
+  dpBnAnchor[stmt] = dpBnAnchor[stmt] === id ? null : id;
+  bnMarkAnchor(svg);
+  bnFocus(svg, null);
+  return true;
+}
+// The anchored node: a click on its name (evidence mode), else the selected node.
+function bnAnchorOf(svg) {
+  const panel = svg.closest(".panel[data-stmt]");
+  const sel = panel?._ia?.select;
+  if (sel && sel.mode === "evidence") return dpBnAnchor[panel.dataset.stmt] || null;
+  let cur = sel ? dpXf[sel.name] : dpSelected;
+  if (Array.isArray(cur)) cur = cur.length === 1 ? cur[0] : null;
+  return cur && svg.querySelector(`rect[data-node="${CSS.escape(String(cur))}"]`) ? String(cur) : null;
+}
+function bnMarkAnchor(svg) {
+  const a = bnAnchorOf(svg);
+  for (const r of svg.querySelectorAll("rect[data-node]")) r.classList.toggle("dp-bn-anchor", r.getAttribute("data-node") === a);
+}
+// The producer's active paths between a and b (data-bn-paths), each a list
+// of [from, to] steps; null when the network names none at all.
+function bnPathsBetween(svg, a, b) {
+  let all;
+  try {
+    all = JSON.parse(svg.getAttribute("data-bn-paths") || "null");
+  } catch (_) {
+    return null;
+  }
+  if (!Array.isArray(all)) return null;
+  return all
+    .map((p) => (Array.isArray(p.steps) ? p.steps : []))
+    .filter((st) => st.length && ((st[0][0] === a && st[st.length - 1][1] === b) || (st[0][0] === b && st[st.length - 1][1] === a)));
+}
+// Hover focus: a node's Markov blanket (its parents, children and their
+// other parents), or with a node anchored the active paths between the two;
+// an arc its two ends. The rest fades.
+function bnFocus(svg, el) {
+  for (const e of svg.querySelectorAll(".dp-bn-path, .dp-bn-blanket")) e.classList.remove("dp-bn-path", "dp-bn-blanket");
+  let keep = null;
+  const id = el?.getAttribute("data-node");
+  const edges = [...svg.querySelectorAll("polyline[data-edge]")].map((e) => [e.getAttribute("data-from"), e.getAttribute("data-to"), e]);
+  if (el && el.hasAttribute("data-edge")) {
+    const [a, b] = [el.getAttribute("data-from"), el.getAttribute("data-to")];
+    keep = { nodes: new Set([a, b]), edge: (x, y) => x === a && y === b };
+  } else if (id != null) {
+    const anchor = bnAnchorOf(svg);
+    const paths = anchor && anchor !== id ? bnPathsBetween(svg, anchor, id) : null;
+    if (paths) {
+      const nodes = new Set([anchor, id]);
+      const on = new Set();
+      for (const st of paths)
+        for (const [f, t] of st) {
+          nodes.add(f).add(t);
+          on.add(f + ">" + t).add(t + ">" + f);
+        }
+      for (const [f, t, e] of edges) if (on.has(f + ">" + t)) e.classList.add("dp-bn-path");
+      keep = { nodes, edge: (f, t) => on.has(f + ">" + t) };
+    } else {
+      const parents = edges.filter(([, t]) => t === id).map(([f]) => f);
+      const children = edges.filter(([f]) => f === id).map(([, t]) => t);
+      const co = edges.filter(([f, t]) => children.includes(t) && f !== id).map(([f]) => f);
+      const nodes = new Set([id, ...parents, ...children, ...co]);
+      for (const r of svg.querySelectorAll("rect[data-node]")) {
+        const n = r.getAttribute("data-node");
+        if (n !== id && nodes.has(n)) r.classList.add("dp-bn-blanket");
+      }
+      keep = { nodes, edge: (f, t) => t === id || f === id || (children.includes(t) && co.includes(f)) };
+    }
+  }
+  dpAnim.emph(
+    svg,
+    "hoverfocus",
+    keep
+      ? (e) => {
+          const n = e.getAttribute("data-node") ?? e.getAttribute("data-of");
+          if (n != null) return keep.nodes.has(n) ? null : 0.22;
+          const f = e.getAttribute("data-from");
+          return f == null ? null : keep.edge(f, e.getAttribute("data-to")) ? null : 0.25;
+        }
+      : null
+  );
+}
+// The chips above the graph: one per node with evidence — what it is, observe
+// or do (a toggle), × retracts; a hint while there is none.
+function decorateEvidence(panel, sel) {
+  const svg = panel.querySelector(".panel-svg > svg[data-diagram]");
+  panel.querySelector(".dp-ia-bar")?.remove();
+  if (svg) bnMarkAnchor(svg);
+  const items = bnEvidence(sel);
+  const bar = document.createElement("div");
+  bar.className = "dp-ia-bar dp-bn-bar";
+  const nodes = [...new Set(items.map((i) => i.node))];
+  if (!nodes.length) {
+    const hint = document.createElement("span");
+    hint.className = "dp-bn-hint";
+    hint.textContent = "Click a state to observe it · shift-click for soft evidence · alt-click to set it (do)";
+    bar.appendChild(hint);
+  }
+  for (const node of nodes) {
+    const mine = items.filter((i) => i.node === node);
+    const label = bnLabel(svg, node);
+    const soft = mine.some((i) => i.likelihood != null);
+    const chip = document.createElement("span");
+    chip.className = "tbl-chip dp-bn-chip";
+    chip.dataset.node = node;
+    const text = soft ? `${label}: soft (${mine.map((i) => `${i.state} ${i.likelihood}`).join(", ")})` : `${label} = ${mine[0].state}`;
+    chip.title = text;
+    chip.append(text);
+    if (!soft) {
+      const isDo = mine[0].mode === "do";
+      const m = document.createElement("button");
+      m.className = "dp-bn-mode";
+      m.textContent = isDo ? "do" : "observe";
+      m.setAttribute("aria-pressed", String(isDo));
+      m.title = isDo ? "Set by an intervention, do(): switch to observing it" : "Observed: switch to setting it, do() — an intervention";
+      m.setAttribute("aria-label", `${label}: ${isDo ? "set (do)" : "observed"} — switch`);
+      m.onclick = (e) => {
+        e.stopPropagation();
+        bnToggle(sel, node, mine[0].state, isDo ? "observe" : "do");
+      };
+      chip.appendChild(m);
+    }
+    const x = document.createElement("button");
+    x.textContent = "×";
+    x.title = "Retract this evidence";
+    x.setAttribute("aria-label", "Retract " + text);
+    x.onclick = (e) => {
+      e.stopPropagation();
+      bnSetEvidence(
+        sel,
+        items.filter((i) => i.node !== node)
+      );
+    };
+    chip.appendChild(x);
+    bar.appendChild(chip);
+  }
+  if (nodes.length > 1) {
+    const all = document.createElement("button");
+    all.className = "dp-bn-clear";
+    all.textContent = "Clear all";
+    all.onclick = (e) => {
+      e.stopPropagation();
+      bnSetEvidence(sel, []);
+    };
+    bar.appendChild(all);
+  }
+  const at = panel.querySelector(".dp-crumbs") || panel.querySelector(".panel-title");
+  at ? at.after(bar) : panel.prepend(bar);
+}
+// A node's evidence panel (shift-click, or Enter on a focused node): observe
+// or set (do) a state, or give each state a likelihood (soft evidence).
+function bnPanel(sel, el) {
+  document.querySelector(".dp-bn-pop")?.remove();
+  let bn = null;
+  try {
+    bn = JSON.parse(el.getAttribute("data-bn") || "null");
+  } catch (_) {}
+  if (!bn || !Array.isArray(bn.states)) return;
+  const id = el.getAttribute("data-node");
+  const label = el.getAttribute("data-xtext") || id;
+  const mine = bnEvidence(sel).filter((i) => i.node === id);
+  const hard = mine.length === 1 && mine[0].likelihood == null ? mine[0] : null;
+  const lik = Object.fromEntries(mine.filter((i) => i.likelihood != null).map((i) => [i.state, i.likelihood]));
+  const pop = document.createElement("div");
+  pop.className = "dp-bn-pop";
+  pop.setAttribute("role", "dialog");
+  pop.setAttribute("aria-label", `Evidence on ${label}`);
+  const rows = bn.states
+    .map((r, k) => {
+      const st = escapeHtml(r.state);
+      const on = (m) => hard && hard.state === r.state && (hard.mode === "do" ? "do" : "observe") === m;
+      const l = lik[r.state] ?? (mine.length ? 0 : 1);
+      return (
+        `<tr><th>${st}</th>` +
+        `<td><button type="button" data-act="observe" data-k="${k}" aria-pressed="${!!on("observe")}">Observe</button>` +
+        `<button type="button" data-act="do" data-k="${k}" aria-pressed="${!!on("do")}">Set (do)</button></td>` +
+        `<td><input type="range" min="0" max="1" step="0.05" value="${l}" data-k="${k}" aria-label="Likelihood of ${st}"><output>${Number(l).toFixed(2)}</output></td></tr>`
+      );
+    })
+    .join("");
+  pop.innerHTML =
+    `<div class="dp-bn-pop-title">Evidence on ${escapeHtml(label)}</div>` +
+    `<table><thead><tr><th></th><th></th><th>likelihood</th></tr></thead><tbody>${rows}</tbody></table>` +
+    `<div class="dp-bn-pop-foot"><button type="button" data-act="soft">Apply likelihoods</button>` +
+    `<button type="button" data-act="retract"${mine.length ? "" : " disabled"}>Retract</button>` +
+    `<button type="button" data-act="close">Close</button></div>`;
+  const close = () => {
+    pop.remove();
+    document.removeEventListener("mousedown", away, true);
+    el.focus?.();
+  };
+  const away = (e) => !pop.contains(e.target) && close();
+  pop.addEventListener("input", (e) => {
+    const o = e.target.nextElementSibling;
+    if (e.target.type === "range" && o) o.textContent = Number(e.target.value).toFixed(2);
+  });
+  pop.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      e.stopPropagation();
+      close();
+    }
+  });
+  pop.addEventListener("click", (e) => {
+    const b = e.target.closest("button[data-act]");
+    if (!b) return;
+    e.stopPropagation();
+    const act = b.dataset.act;
+    const state = bn.states[+b.dataset.k]?.state;
+    const rest = bnEvidence(sel).filter((i) => i.node !== id);
+    close();
+    if (act === "observe" || act === "do") bnToggle(sel, id, state, act);
+    else if (act === "retract") bnSetEvidence(sel, rest);
+    else if (act === "soft") {
+      const ls = [...pop.querySelectorAll("input[type=range]")].map((i) => Number(i.value));
+      // no state above 0, or all alike: no information — retract
+      if (!ls.some((v) => v > 0) || ls.every((v) => v === ls[0])) return bnSetEvidence(sel, rest);
+      bnSetEvidence(sel, [...rest, ...bn.states.map((r, k) => ({ node: id, state: r.state, likelihood: ls[k] }))]);
+    }
+  });
+  document.body.appendChild(pop);
+  const r = el.getBoundingClientRect();
+  const w = pop.offsetWidth;
+  const h = pop.offsetHeight;
+  pop.style.left = Math.max(8, Math.min(r.right + 8, innerWidth - w - 8)) + "px";
+  pop.style.top = Math.max(8, Math.min(r.top, innerHeight - h - 8)) + "px";
+  setTimeout(() => document.addEventListener("mousedown", away, true));
+  pop.querySelector("button")?.focus();
 }
 
 function customTip(el, info, fill) {
