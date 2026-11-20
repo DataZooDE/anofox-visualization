@@ -145,6 +145,36 @@ const clickAlt = (page, id, label) => page.click(`.dp-viewbar[data-view-id="${id
   check(!one.errs.length && !two.errs.length, `(c) no page errors: ${[...one.errs, ...two.errs].join(" | ")}`);
 }
 
+// (d) a 'header'-placed switcher: after a re-run (an input changes) only the
+// picked alternative shows — the bar moved back to the end of its group made
+// the patch give every pane a button's attributes, so all of them showed.
+{
+  const sql = `SELECT r AS region ::DROPDOWN FROM (VALUES ('North'), ('South')) t(r);
+SELECT 'header' ::VIEW_PLACEMENT;
+SELECT 'Lines' AS hd ::VIEW;
+SELECT i::XAXIS, i * (CASE getvariable('region') WHEN 'South' THEN 2 ELSE 1 END) AS y ::LINECHART, 'T'::TITLE FROM range(5) t(i);
+SELECT 'Bars' AS hd ::VIEW;
+SELECT i::XAXIS, i + 1 AS y ::BARCHART, 'T'::TITLE FROM range(5) t(i);
+SELECT 'Table' AS hd ::VIEW;
+SELECT i AS w ::TABLE FROM range(5) t(i);
+SELECT 1 ::ENDVIEW;
+`;
+  const { page, errs } = await open(sql);
+  const shown = () =>
+    page.evaluate(() =>
+      [...document.querySelectorAll(".dp-views > .dp-viewpane")].map((p) => (p.style.display === "none" ? 0 : 1)).join("")
+    );
+  await page.click('.dp-viewbar [role="tab"]:has-text("Bars")');
+  await page.waitForTimeout(300);
+  check((await shown()) === "010", `(d) Bars picked: ${await shown()}`);
+  await page.locator('select:has(option:text-is("South"))').first().selectOption({ label: "South" });
+  await page.waitForFunction(() => !document.querySelector(".dash .dp-pending"), null, { timeout: 60000 });
+  await page.waitForTimeout(500);
+  check((await shown()) === "010", `(d) after a re-run only Bars shows (got ${await shown()}; before the fix 111)`);
+  check(!errs.length, `(d) no page errors: ${errs.join(" | ")}`);
+  await page.close();
+}
+
 await browser.close();
 console.log(bad ? `${bad} FAILED` : "all ok");
 process.exit(bad ? 1 : 0);

@@ -16076,7 +16076,11 @@ function placeViewHeaderBars(root) {
 function unplaceViewHeaderBars(root) {
   root.querySelectorAll(".dp-views.dp-views-header").forEach((sec) => {
     const bar = sec.querySelector(".dp-viewbar");
-    if (bar && bar.parentElement !== sec) sec.appendChild(bar);
+    // First, where the render built it (before the panes): patchSlots pairs
+    // the old and new tab/pane elements by position, so a bar appended after
+    // the panes gave each pane a button's (missing) style — every
+    // alternative showed after a re-run until a button was clicked.
+    if (bar && bar.parentElement !== sec) sec.prepend(bar);
   });
 }
 

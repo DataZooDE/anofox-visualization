@@ -78,6 +78,13 @@ body.embed::before{background-image:var(--ax-bg-pattern)}
 .dp-seg button:hover{color:var(--ax-ink);background:var(--ax-tab-hover-bg)}
 .dp-seg button[aria-checked=true],.dp-seg button[aria-pressed=true],.dp-viewbar [aria-selected=true]{background:var(--ax-accent);color:var(--ax-accent-ink)}
 .dp-seg button:focus-visible{outline:none;box-shadow:var(--ax-focus-ring)}
+/* A ::VIEW switcher picks how one card shows its data — quieter than an input:
+   a soft track, the shown view a raised chip (not an accent pill). */
+.dp-viewbar.dp-seg{border:0;box-shadow:none;background:color-mix(in srgb,var(--ax-ink) 6%,transparent);border-radius:9px;padding:3px;gap:2px}
+.dp-viewbar.dp-seg button{font-weight:500;color:var(--ax-muted);border-radius:7px;padding:.32rem .8rem}
+.dp-viewbar.dp-seg button:hover{color:var(--ax-ink);background:color-mix(in srgb,var(--ax-ink) 5%,transparent)}
+.dp-viewbar.dp-seg [aria-selected=true],.dp-viewbar.dp-seg [aria-selected=true]:hover{background:var(--ax-card);color:var(--ax-ink);font-weight:600;box-shadow:var(--ax-input-shadow),0 0 0 1px color-mix(in srgb,var(--ax-ink) 7%,transparent)}
+body.dark .dp-viewbar.dp-seg [aria-selected=true]{background:color-mix(in srgb,var(--ax-ink) 16%,var(--ax-card))}
 .control.dp-toggle{cursor:pointer;color:var(--ax-ink)}
 .control.dp-toggle input{appearance:none;-webkit-appearance:none;position:relative;width:2.3rem;min-width:0;height:1.3rem;padding:0;margin:0;border-radius:999px;border:1px solid var(--ax-line);background:var(--ax-slider-track);cursor:pointer;transition:background .15s,border-color .15s}
 .control.dp-toggle input::after{content:"";position:absolute;top:2px;left:2px;width:calc(1.3rem - 6px);height:calc(1.3rem - 6px);border-radius:50%;background:var(--ax-card);box-shadow:var(--ax-zoom-handle-shadow);transition:transform .15s}
@@ -670,8 +677,8 @@ body.dark .dp-img-row.has-dark .dp-img-missing{display:none}
 /* #950: an `@inputs auto` bar for one panel, moved into its title */
 .panel-title:has(.dp-autobar){display:flex;flex-wrap:wrap;align-items:baseline;gap:.3rem .6rem}
 .panel-title .dp-autobar{margin-left:auto;align-self:center;background:none;border:0;box-shadow:none;padding:0;gap:.6rem;font-weight:400;font-size:.85rem;overflow:visible}
-.panel-title .dp-seg{padding:1px;gap:1px}
-.panel-title .dp-seg button{padding:.28rem .55rem;font-size:.76rem}
+.panel-title .dp-seg{padding:2px;gap:1px}
+.panel-title .dp-seg button{padding:.22rem .65rem;font-size:.76rem}
 /* below a minimum card width: segmented buttons fold into one <select> —
    a child of the bar itself, so it travels with it when the card swaps. */
 .dp-viewbar-select{display:none;font:inherit;font-size:.78rem;font-weight:600;color:var(--ax-ink);background:var(--ax-input-bg);border:1px solid var(--ax-line);border-radius:8px;padding:.3rem .5rem;cursor:pointer;max-width:100%}
