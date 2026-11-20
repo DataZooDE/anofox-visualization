@@ -46,7 +46,8 @@ function makeHarness() {
 let servedIndex = null, servedPlan = null;
 const servedVars = {}, servedAborts = new Map(), servedCache = new Map();
 const SERVED_CACHE_MAX = 400; let servedDepsOff = false;
-const servedViewer = "0".repeat(32);`;
+const servedViewer = "0".repeat(32);
+const serverRoleTokens = () => new Set(); // #1306: no server-only plugin here`;
   const make = new Function(
     "window",
     "plan",

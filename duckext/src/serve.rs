@@ -11139,6 +11139,12 @@ fn split_draw(body: &str) -> Result<(String, Option<Draw>), String> {
 /// The last drawn panels (#1306), by ETag (rows, size and context).
 static DRAWN: std::sync::Mutex<Vec<(String, Arc<String>)>> = std::sync::Mutex::new(Vec::new());
 const DRAWN_MAX: usize = 64;
+/// At most this many bytes of drawings are kept (oldest dropped first).
+const DRAWN_MAX_BYTES: usize = 64 << 20;
+/// Drawings in progress: a plugin draw runs outside the query slots, so it
+/// has its own small limit — more at once answer 503 (security review).
+static DRAWING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+const DRAWING_MAX: usize = 2;
 
 /// A panel's rows without `"__anofox_svg"` (#1306 security review): the page
 /// shows that field as markup, so no query result may carry it — only
@@ -11147,8 +11153,12 @@ fn strip_drawn_field(json: Arc<String>) -> Result<Arc<String>, String> {
     if !json.contains("__anofox_svg") {
         return Ok(json);
     }
-    let mut rows: Vec<serde_json::Map<String, serde_json::Value>> =
-        serde_json::from_str(&json).map_err(|e| e.to_string())?;
+    // (a paged answer isn't a plain row list: no plugin draws one)
+    let Ok(mut rows) =
+        serde_json::from_str::<Vec<serde_json::Map<String, serde_json::Value>>>(&json)
+    else {
+        return Ok(json);
+    };
     for r in &mut rows {
         r.remove("__anofox_svg");
     }
@@ -11197,19 +11207,29 @@ fn drawn_panel(
     {
         return Ok((hit, tag));
     }
+    use std::sync::atomic::Ordering::SeqCst;
+    if DRAWING.fetch_add(1, SeqCst) >= DRAWING_MAX {
+        DRAWING.fetch_sub(1, SeqCst);
+        return Err((503, "busy drawing panels: try again in a moment".into()));
+    }
     let svg =
-        anofox_visualization::host::render_panel_rows(&json, &roles, d.width, d.height, &d.ctx)
-            .map_err(|e| (500, e))?;
+        anofox_visualization::host::render_panel_rows(&json, &roles, d.width, d.height, &d.ctx);
+    DRAWING.fetch_sub(1, SeqCst);
+    let svg = svg.map_err(|e| (500, e))?;
     rows[0].insert("__anofox_svg".into(), serde_json::Value::String(svg));
     let out = Arc::new(serde_json::to_string(&rows).map_err(|e| (500, e.to_string()))?);
     if out.len() > st.opts.max_response {
         return Err((413, "the drawn panel exceeds max_response_mb".into()));
     }
     if let Ok(mut c) = DRAWN.lock() {
-        if c.len() >= DRAWN_MAX {
-            c.remove(0);
+        if out.len() <= DRAWN_MAX_BYTES / 8 {
+            c.push((tag.clone(), out.clone()));
+            while c.len() > DRAWN_MAX
+                || c.iter().map(|(_, j)| j.len()).sum::<usize>() > DRAWN_MAX_BYTES
+            {
+                c.remove(0);
+            }
         }
-        c.push((tag.clone(), out.clone()));
     }
     Ok((out, tag))
 }
