@@ -198,3 +198,29 @@ SELECT anofox_plot_bayes_net(n,
          evidence := [{'node': 'sprinkler', 'state': 'yes', 'mode': 'do'}])
        AS "Turning the sprinkler on: the clouds stay at 50 %"
 FROM bn_do_nodes n;
+
+-- @tile A decision's policy | An influence diagram: `policy :=` draws each decision's policy as a table in its box — a row per thing known when deciding, a column per option with its expected payoff, the best one marked. Arcs into a decision are dotted (what is known), the payoff's expected value sits in its diamond.
+SELECT 'bayes-net'::REQUIRES;
+SELECT 12::COL;
+CREATE TABLE id_nodes AS
+SELECT * FROM (VALUES ('test', 'Test?', 'decision', ['test', 'no test']), ('oil', 'Oil', 'chance', ['dry', 'wet', 'soaking']),
+                      ('seismic', 'Seismic', 'chance', ['closed', 'open', 'diffuse', 'none']),
+                      ('drill', 'Drill?', 'decision', ['drill', 'walk away']), ('payoff', 'Payoff', 'utility', []::VARCHAR[])) t(id, label, kind, states);
+CREATE TABLE id_policy AS
+SELECT d AS decision, ps AS parent_states, o AS option, eu AS expected_utility, c AS chosen
+FROM (VALUES ('test', []::VARCHAR[], 'test', 22.5, true), ('test', [], 'no test', 20, false),
+             ('drill', ['no test', 'none'], 'drill', 20, true), ('drill', ['no test', 'none'], 'walk away', 0, false),
+             ('drill', ['test', 'closed'], 'drill', 77.5, true), ('drill', ['test', 'closed'], 'walk away', -10, false),
+             ('drill', ['test', 'open'], 'drill', 22.9, true), ('drill', ['test', 'open'], 'walk away', -10, false),
+             ('drill', ['test', 'diffuse'], 'drill', -40.5, false), ('drill', ['test', 'diffuse'], 'walk away', -10, true)) t(d, ps, o, eu, c);
+SELECT anofox_plot_bayes_net(n,
+         arcs := [{'from': 'oil', 'to': 'seismic'}, {'from': 'test', 'to': 'seismic'}, {'from': 'test', 'to': 'drill'},
+                  {'from': 'seismic', 'to': 'drill'}, {'from': 'oil', 'to': 'payoff'}, {'from': 'drill', 'to': 'payoff'}],
+         beliefs := [{'node': 'oil', 'state': 'dry', 'probability': 0.5}, {'node': 'oil', 'state': 'wet', 'probability': 0.3},
+                     {'node': 'oil', 'state': 'soaking', 'probability': 0.2},
+                     {'node': 'seismic', 'state': 'closed', 'probability': 0.24}, {'node': 'seismic', 'state': 'open', 'probability': 0.35},
+                     {'node': 'seismic', 'state': 'diffuse', 'probability': 0.41}, {'node': 'seismic', 'state': 'none', 'probability': 0},
+                     {'node': 'payoff', 'state': NULL, 'probability': NULL, 'expected_utility': 32.5}],
+         policy := (SELECT list(p) FROM id_policy p))
+       AS "Drill unless the test reads diffuse; test first"
+FROM id_nodes n;

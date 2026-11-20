@@ -44,6 +44,8 @@ import t18l from "../../../assets/gallery/features/18-light.webp";
 import t18d from "../../../assets/gallery/features/18-dark.webp";
 import t19l from "../../../assets/gallery/features/19-light.webp";
 import t19d from "../../../assets/gallery/features/19-dark.webp";
+import t20l from "../../../assets/gallery/features/20-light.webp";
+import t20d from "../../../assets/gallery/features/20-dark.webp";
 
 Beyond single charts: clicks that filter and drill, switchable views, composed figures, guided steps, annotations from data, diagrams, factor graphs, Bayesian networks and their automatic analysis — each a few lines of SQL.
 
@@ -517,6 +519,46 @@ FROM bn_do_nodes n;
 ```
 
 <a class="gal-edit" href="../../app/?mode=edit#sql=Q1JFQVRFIFRBQkxFIGdlbyBBUyBTRUxFQ1QgKiBGUk9NIChWQUxVRVMKICAoJ0VVJywnR2VybWFueScsJ0JlcmxpbicpLCgnRVUnLCdHZXJtYW55JywnTXVuaWNoJyksKCdFVScsJ0ZyYW5jZScsJ1BhcmlzJyksKCdFVScsJ0ZyYW5jZScsJ0x5b24nKSwKICAoJ0FtZXJpY2FzJywnVVNBJywnTmV3IFlvcmsnKSwoJ0FtZXJpY2FzJywnVVNBJywnQ2hpY2FnbycpLCgnQW1lcmljYXMnLCdDYW5hZGEnLCdUb3JvbnRvJyksCiAgKCdBUEFDJywnSmFwYW4nLCdUb2t5bycpLCgnQVBBQycsJ0phcGFuJywnT3Nha2EnKSwoJ0FQQUMnLCdBdXN0cmFsaWEnLCdTeWRuZXknKSkgdChyZWdpb24sIGNvdW50cnksIGNpdHkpOwpDUkVBVEUgVEFCTEUgb3JkZXJzIEFTClNFTEVDVCBEQVRFICcyMDI2LTAxLTA1JyArICg3ICogdyk6OklOVCBBUyB3ZWVrLCBnLnJlZ2lvbiwgZy5jb3VudHJ5LCBnLmNpdHksIGMuY2hhbm5lbCwKICAgICAgIChhYnMoaGFzaChnLmNpdHkgfHwgYy5jaGFubmVsIHx8IHcpKSAlIDYwICsgMjAgKyAyICogdykgQVMgcmV2ZW51ZQpGUk9NIGdlbyBnLCAoVkFMVUVTICgnd2ViJyksICgnYXBwJyksICgnc3RvcmUnKSkgYyhjaGFubmVsKSwgcmFuZ2UoMjYpIHIodyk7ClNFTEVDVCAyOjpDT0xVTU5TOwoKU0VMRUNUICdiYXllcy1uZXQnOjpSRVFVSVJFUzsKU0VMRUNUIDEyOjpDT0w7CkNSRUFURSBUQUJMRSBibl9kb19ub2RlcyBBUwpTRUxFQ1QgKiBGUk9NIChWQUxVRVMgKCdjbG91ZHknLCAnQ2xvdWR5JyksICgnc3ByaW5rbGVyJywgJ1Nwcmlua2xlciBvbicpLCAoJ3JhaW4nLCAnUmFpbicpLCAoJ2dyYXNzJywgJ1dldCBncmFzcycpKSB0KGlkLCBsYWJlbCksCiAgICAgICAgICAgICAgKFNFTEVDVCAnY2hhbmNlJyBBUyBraW5kLCBbJ3llcycsICdubyddIEFTIHN0YXRlcyk7Ci0tIHRoZSBiZWxpZWZzIHdpdGggdGhlIHNwcmlua2xlciBzZXQgb24sIGRvKCksIGFuZCBiZWZvcmU6IHNlZW4gb24KQ1JFQVRFIFRBQkxFIGJuX2RvX2JlbGllZnMgQVMKU0VMRUNUIG5vZGUsIHMuc3RhdGUsIENBU0Ugcy5zdGF0ZSBXSEVOICd5ZXMnIFRIRU4gcCBFTFNFIDEgLSBwIEVORCBBUyBwcm9iYWJpbGl0eSwKICAgICAgIENBU0Ugcy5zdGF0ZSBXSEVOICd5ZXMnIFRIRU4gcSBFTFNFIDEgLSBxIEVORCBBUyBwcmlvciwgQ0FTRSBzLnN0YXRlIFdIRU4gJ3llcycgVEhFTiB3IEVMU0UgMSAtIHcgRU5EIEFTIHByZXZpb3VzCkZST00gKFZBTFVFUyAoJ2Nsb3VkeScsIDAuNSwgMC41LCAwLjE2NjcpLCAoJ3Nwcmlua2xlcicsIDEuMCwgMC4zLCAxLjApLCAoJ3JhaW4nLCAwLjUsIDAuNSwgMC4zKSwgKCdncmFzcycsIDAuOTQ1LCAwLjY0NzEsIDAuOTI3KSkgdChub2RlLCBwLCBxLCB3KSwKICAgICAoVkFMVUVTICgneWVzJyksICgnbm8nKSkgcyhzdGF0ZSk7ClNFTEVDVCBhbm9mb3hfcGxvdF9iYXllc19uZXQobiwKICAgICAgICAgYXJjcyA6PSBbeydmcm9tJzogJ2Nsb3VkeScsICd0byc6ICdzcHJpbmtsZXInfSwgeydmcm9tJzogJ2Nsb3VkeScsICd0byc6ICdyYWluJ30sCiAgICAgICAgICAgICAgICAgIHsnZnJvbSc6ICdzcHJpbmtsZXInLCAndG8nOiAnZ3Jhc3MnfSwgeydmcm9tJzogJ3JhaW4nLCAndG8nOiAnZ3Jhc3MnfV0sCiAgICAgICAgIGJlbGllZnMgOj0gKFNFTEVDVCBsaXN0KGIpIEZST00gYm5fZG9fYmVsaWVmcyBiKSwKICAgICAgICAgZXZpZGVuY2UgOj0gW3snbm9kZSc6ICdzcHJpbmtsZXInLCAnc3RhdGUnOiAneWVzJywgJ21vZGUnOiAnZG8nfV0pCiAgICAgICBBUyAiVHVybmluZyB0aGUgc3ByaW5rbGVyIG9uOiB0aGUgY2xvdWRzIHN0YXkgYXQgNTAgJSIKRlJPTSBibl9kb19ub2RlcyBuOwo=">Edit it in the builder ↗</a>
+
+</div>
+</div>
+
+<div class="gal-tile">
+<div class="gal-pic"><img class="lp-light" src={t20l.src} alt="" loading="lazy" /><img class="lp-dark" src={t20d.src} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### A decision's policy
+
+An influence diagram: `policy :=` draws each decision's policy as a table in its box — a row per thing known when deciding, a column per option with its expected payoff, the best one marked. Arcs into a decision are dotted (what is known), the payoff's expected value sits in its diamond.
+
+```sql
+SELECT 'bayes-net'::REQUIRES;
+SELECT 12::COL;
+CREATE TABLE id_nodes AS
+SELECT * FROM (VALUES ('test', 'Test?', 'decision', ['test', 'no test']), ('oil', 'Oil', 'chance', ['dry', 'wet', 'soaking']),
+                      ('seismic', 'Seismic', 'chance', ['closed', 'open', 'diffuse', 'none']),
+                      ('drill', 'Drill?', 'decision', ['drill', 'walk away']), ('payoff', 'Payoff', 'utility', []::VARCHAR[])) t(id, label, kind, states);
+CREATE TABLE id_policy AS
+SELECT d AS decision, ps AS parent_states, o AS option, eu AS expected_utility, c AS chosen
+FROM (VALUES ('test', []::VARCHAR[], 'test', 22.5, true), ('test', [], 'no test', 20, false),
+             ('drill', ['no test', 'none'], 'drill', 20, true), ('drill', ['no test', 'none'], 'walk away', 0, false),
+             ('drill', ['test', 'closed'], 'drill', 77.5, true), ('drill', ['test', 'closed'], 'walk away', -10, false),
+             ('drill', ['test', 'open'], 'drill', 22.9, true), ('drill', ['test', 'open'], 'walk away', -10, false),
+             ('drill', ['test', 'diffuse'], 'drill', -40.5, false), ('drill', ['test', 'diffuse'], 'walk away', -10, true)) t(d, ps, o, eu, c);
+SELECT anofox_plot_bayes_net(n,
+         arcs := [{'from': 'oil', 'to': 'seismic'}, {'from': 'test', 'to': 'seismic'}, {'from': 'test', 'to': 'drill'},
+                  {'from': 'seismic', 'to': 'drill'}, {'from': 'oil', 'to': 'payoff'}, {'from': 'drill', 'to': 'payoff'}],
+         beliefs := [{'node': 'oil', 'state': 'dry', 'probability': 0.5}, {'node': 'oil', 'state': 'wet', 'probability': 0.3},
+                     {'node': 'oil', 'state': 'soaking', 'probability': 0.2},
+                     {'node': 'seismic', 'state': 'closed', 'probability': 0.24}, {'node': 'seismic', 'state': 'open', 'probability': 0.35},
+                     {'node': 'seismic', 'state': 'diffuse', 'probability': 0.41}, {'node': 'seismic', 'state': 'none', 'probability': 0},
+                     {'node': 'payoff', 'state': NULL, 'probability': NULL, 'expected_utility': 32.5}],
+         policy := (SELECT list(p) FROM id_policy p))
+       AS "Drill unless the test reads diffuse; test first"
+FROM id_nodes n;
+```
+
+<a class="gal-edit" href="../../app/?mode=edit#sql=Q1JFQVRFIFRBQkxFIGdlbyBBUyBTRUxFQ1QgKiBGUk9NIChWQUxVRVMKICAoJ0VVJywnR2VybWFueScsJ0JlcmxpbicpLCgnRVUnLCdHZXJtYW55JywnTXVuaWNoJyksKCdFVScsJ0ZyYW5jZScsJ1BhcmlzJyksKCdFVScsJ0ZyYW5jZScsJ0x5b24nKSwKICAoJ0FtZXJpY2FzJywnVVNBJywnTmV3IFlvcmsnKSwoJ0FtZXJpY2FzJywnVVNBJywnQ2hpY2FnbycpLCgnQW1lcmljYXMnLCdDYW5hZGEnLCdUb3JvbnRvJyksCiAgKCdBUEFDJywnSmFwYW4nLCdUb2t5bycpLCgnQVBBQycsJ0phcGFuJywnT3Nha2EnKSwoJ0FQQUMnLCdBdXN0cmFsaWEnLCdTeWRuZXknKSkgdChyZWdpb24sIGNvdW50cnksIGNpdHkpOwpDUkVBVEUgVEFCTEUgb3JkZXJzIEFTClNFTEVDVCBEQVRFICcyMDI2LTAxLTA1JyArICg3ICogdyk6OklOVCBBUyB3ZWVrLCBnLnJlZ2lvbiwgZy5jb3VudHJ5LCBnLmNpdHksIGMuY2hhbm5lbCwKICAgICAgIChhYnMoaGFzaChnLmNpdHkgfHwgYy5jaGFubmVsIHx8IHcpKSAlIDYwICsgMjAgKyAyICogdykgQVMgcmV2ZW51ZQpGUk9NIGdlbyBnLCAoVkFMVUVTICgnd2ViJyksICgnYXBwJyksICgnc3RvcmUnKSkgYyhjaGFubmVsKSwgcmFuZ2UoMjYpIHIodyk7ClNFTEVDVCAyOjpDT0xVTU5TOwoKU0VMRUNUICdiYXllcy1uZXQnOjpSRVFVSVJFUzsKU0VMRUNUIDEyOjpDT0w7CkNSRUFURSBUQUJMRSBpZF9ub2RlcyBBUwpTRUxFQ1QgKiBGUk9NIChWQUxVRVMgKCd0ZXN0JywgJ1Rlc3Q/JywgJ2RlY2lzaW9uJywgWyd0ZXN0JywgJ25vIHRlc3QnXSksICgnb2lsJywgJ09pbCcsICdjaGFuY2UnLCBbJ2RyeScsICd3ZXQnLCAnc29ha2luZyddKSwKICAgICAgICAgICAgICAgICAgICAgICgnc2Vpc21pYycsICdTZWlzbWljJywgJ2NoYW5jZScsIFsnY2xvc2VkJywgJ29wZW4nLCAnZGlmZnVzZScsICdub25lJ10pLAogICAgICAgICAgICAgICAgICAgICAgKCdkcmlsbCcsICdEcmlsbD8nLCAnZGVjaXNpb24nLCBbJ2RyaWxsJywgJ3dhbGsgYXdheSddKSwgKCdwYXlvZmYnLCAnUGF5b2ZmJywgJ3V0aWxpdHknLCBbXTo6VkFSQ0hBUltdKSkgdChpZCwgbGFiZWwsIGtpbmQsIHN0YXRlcyk7CkNSRUFURSBUQUJMRSBpZF9wb2xpY3kgQVMKU0VMRUNUIGQgQVMgZGVjaXNpb24sIHBzIEFTIHBhcmVudF9zdGF0ZXMsIG8gQVMgb3B0aW9uLCBldSBBUyBleHBlY3RlZF91dGlsaXR5LCBjIEFTIGNob3NlbgpGUk9NIChWQUxVRVMgKCd0ZXN0JywgW106OlZBUkNIQVJbXSwgJ3Rlc3QnLCAyMi41LCB0cnVlKSwgKCd0ZXN0JywgW10sICdubyB0ZXN0JywgMjAsIGZhbHNlKSwKICAgICAgICAgICAgICgnZHJpbGwnLCBbJ25vIHRlc3QnLCAnbm9uZSddLCAnZHJpbGwnLCAyMCwgdHJ1ZSksICgnZHJpbGwnLCBbJ25vIHRlc3QnLCAnbm9uZSddLCAnd2FsayBhd2F5JywgMCwgZmFsc2UpLAogICAgICAgICAgICAgKCdkcmlsbCcsIFsndGVzdCcsICdjbG9zZWQnXSwgJ2RyaWxsJywgNzcuNSwgdHJ1ZSksICgnZHJpbGwnLCBbJ3Rlc3QnLCAnY2xvc2VkJ10sICd3YWxrIGF3YXknLCAtMTAsIGZhbHNlKSwKICAgICAgICAgICAgICgnZHJpbGwnLCBbJ3Rlc3QnLCAnb3BlbiddLCAnZHJpbGwnLCAyMi45LCB0cnVlKSwgKCdkcmlsbCcsIFsndGVzdCcsICdvcGVuJ10sICd3YWxrIGF3YXknLCAtMTAsIGZhbHNlKSwKICAgICAgICAgICAgICgnZHJpbGwnLCBbJ3Rlc3QnLCAnZGlmZnVzZSddLCAnZHJpbGwnLCAtNDAuNSwgZmFsc2UpLCAoJ2RyaWxsJywgWyd0ZXN0JywgJ2RpZmZ1c2UnXSwgJ3dhbGsgYXdheScsIC0xMCwgdHJ1ZSkpIHQoZCwgcHMsIG8sIGV1LCBjKTsKU0VMRUNUIGFub2ZveF9wbG90X2JheWVzX25ldChuLAogICAgICAgICBhcmNzIDo9IFt7J2Zyb20nOiAnb2lsJywgJ3RvJzogJ3NlaXNtaWMnfSwgeydmcm9tJzogJ3Rlc3QnLCAndG8nOiAnc2Vpc21pYyd9LCB7J2Zyb20nOiAndGVzdCcsICd0byc6ICdkcmlsbCd9LAogICAgICAgICAgICAgICAgICB7J2Zyb20nOiAnc2Vpc21pYycsICd0byc6ICdkcmlsbCd9LCB7J2Zyb20nOiAnb2lsJywgJ3RvJzogJ3BheW9mZid9LCB7J2Zyb20nOiAnZHJpbGwnLCAndG8nOiAncGF5b2ZmJ31dLAogICAgICAgICBiZWxpZWZzIDo9IFt7J25vZGUnOiAnb2lsJywgJ3N0YXRlJzogJ2RyeScsICdwcm9iYWJpbGl0eSc6IDAuNX0sIHsnbm9kZSc6ICdvaWwnLCAnc3RhdGUnOiAnd2V0JywgJ3Byb2JhYmlsaXR5JzogMC4zfSwKICAgICAgICAgICAgICAgICAgICAgeydub2RlJzogJ29pbCcsICdzdGF0ZSc6ICdzb2FraW5nJywgJ3Byb2JhYmlsaXR5JzogMC4yfSwKICAgICAgICAgICAgICAgICAgICAgeydub2RlJzogJ3NlaXNtaWMnLCAnc3RhdGUnOiAnY2xvc2VkJywgJ3Byb2JhYmlsaXR5JzogMC4yNH0sIHsnbm9kZSc6ICdzZWlzbWljJywgJ3N0YXRlJzogJ29wZW4nLCAncHJvYmFiaWxpdHknOiAwLjM1fSwKICAgICAgICAgICAgICAgICAgICAgeydub2RlJzogJ3NlaXNtaWMnLCAnc3RhdGUnOiAnZGlmZnVzZScsICdwcm9iYWJpbGl0eSc6IDAuNDF9LCB7J25vZGUnOiAnc2Vpc21pYycsICdzdGF0ZSc6ICdub25lJywgJ3Byb2JhYmlsaXR5JzogMH0sCiAgICAgICAgICAgICAgICAgICAgIHsnbm9kZSc6ICdwYXlvZmYnLCAnc3RhdGUnOiBOVUxMLCAncHJvYmFiaWxpdHknOiBOVUxMLCAnZXhwZWN0ZWRfdXRpbGl0eSc6IDMyLjV9XSwKICAgICAgICAgcG9saWN5IDo9IChTRUxFQ1QgbGlzdChwKSBGUk9NIGlkX3BvbGljeSBwKSkKICAgICAgIEFTICJEcmlsbCB1bmxlc3MgdGhlIHRlc3QgcmVhZHMgZGlmZnVzZTsgdGVzdCBmaXJzdCIKRlJPTSBpZF9ub2RlcyBuOwo=">Edit it in the builder ↗</a>
 
 </div>
 </div>

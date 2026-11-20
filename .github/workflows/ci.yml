@@ -938,6 +938,14 @@ jobs:
         timeout-minutes: 5
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/bayes-net-e2e.mjs --url http://127.0.0.1:8947/
 
+      # scripts/bayes-decisions-e2e.mjs (#1279): decision views — a
+      # decision's policy in its box, a click decides; a troubleshooting plan
+      # that re-plans after each answer; the evidence search. Reuses the
+      # :8947 server and Chromium above.
+      - name: Bayesian network decisions e2e (#1279)
+        timeout-minutes: 5
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/bayes-decisions-e2e.mjs --url http://127.0.0.1:8947/
+
       # scripts/plugins-browser-e2e.mjs (#1213 step 3): runtime plugins in
       # the browser builder — the example plugin draws a panel and its
       # contract macro, a plugin with an import is refused. Its own copies

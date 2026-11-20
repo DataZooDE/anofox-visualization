@@ -61,6 +61,7 @@ fn style_word(s: EdgeStyle) -> &'static str {
         EdgeStyle::Flow(true) => "flow-volume",
         EdgeStyle::Dots(false) => "flow-dots",
         EdgeStyle::Dots(true) => "flow-dots-volume",
+        EdgeStyle::Dotted => "dotted",
     }
 }
 

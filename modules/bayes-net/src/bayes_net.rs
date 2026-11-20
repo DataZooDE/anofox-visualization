@@ -19,7 +19,10 @@
 //!   highlights the paths between them;
 //! - `tables := ` `node, parent_states, state, probability`: the
 //!   conditional probability tables, `parent_states` in the order of the
-//!   node's arcs.
+//!   node's arcs;
+//! - `policy := ` `decision, parent_states, option, expected_utility,
+//!   chosen` (#1279, an influence diagram): a decision's policy, drawn as a
+//!   table in its box ([`decisions`]).
 //!
 //! `anofox_plot_bayes_net(nodes, arcs := …, beliefs := …)` maps them onto
 //! the `::DIAGRAM` roles: `kind` → `::SHAPE`, the states with their belief,
@@ -31,6 +34,8 @@
 use crate::Row;
 use anofox_viz_plugin::OutColumn;
 use serde_json::{json, Map, Value as J};
+
+mod decisions;
 
 /// The node kinds the contract knows.
 pub(crate) const KINDS: &[&str] = &[
@@ -331,6 +336,12 @@ fn problems(rows: &[Row], options: &Row) -> Result<Vec<String>, String> {
             note(t.clone());
         }
     }
+    // #1279: the decisions a policy names
+    for r in &list(options, "policy")? {
+        if let Some(id) = get(r, &["decision", "node"]) {
+            note(id);
+        }
+    }
     if !unknown.is_empty() {
         out.push(format!(
             "bayes_net/unknown-id: arcs, beliefs, evidence, tables or paths name {} that are not nodes",
@@ -452,6 +463,8 @@ fn problems(rows: &[Row], options: &Row) -> Result<Vec<String>, String> {
             broken.join(", ")
         ));
     }
+    // #1279: the policy
+    out.extend(decisions::problems(&net, options)?);
     Ok(out)
 }
 
@@ -491,6 +504,7 @@ pub(crate) fn columns(rows: &[Row], options: &Row) -> Result<Vec<OutColumn>, Str
     let beliefs = list(options, "beliefs")?;
     let evidence = list(options, "evidence")?;
     let tables = list(options, "tables")?;
+    let policy = list(options, "policy")?;
     let cut = intervened(&evidence);
     let threshold = num(options, &["threshold"]).unwrap_or(0.5);
     let direction = get(options, &["direction"])
@@ -507,6 +521,8 @@ pub(crate) fn columns(rows: &[Row], options: &Row) -> Result<Vec<OutColumn>, Str
 
     let (mut ids, mut labels, mut shapes, mut cards) = (vec![], vec![], vec![], vec![]);
     let (mut tiers, mut groups) = (vec![], vec![]);
+    // #1279: a utility node's expected value, in its diamond
+    let mut utilities: Vec<J> = Vec::new();
     let mut tier_names: Vec<String> = Vec::new();
     for (id, row) in &net.nodes {
         let kind = net.kind(id);
@@ -532,6 +548,12 @@ pub(crate) fn columns(rows: &[Row], options: &Row) -> Result<Vec<OutColumn>, Str
             None => J::Null,
         });
         groups.push(get(row, &["group"]).map_or(J::Null, J::String));
+        utilities.push(
+            (kind == "utility")
+                .then(|| decisions::expected_utility(&beliefs, id))
+                .flatten()
+                .map_or(J::Null, |v| json!(v)),
+        );
         let states = net.states(id);
         if kind == "utility" || states.is_empty() {
             cards.push(J::Null);
@@ -640,6 +662,10 @@ pub(crate) fn columns(rows: &[Row], options: &Row) -> Result<Vec<OutColumn>, Str
                 }),
             );
         }
+        // #1279: a decision's policy
+        if let Some(p) = decisions::policy_card(&net, id, &policy, &evidence) {
+            card.insert("policy".into(), p);
+        }
         cards.push(J::Object(card));
     }
     // a node's card as the text ::BELIEF reads
@@ -678,7 +704,11 @@ pub(crate) fn columns(rows: &[Row], options: &Row) -> Result<Vec<OutColumn>, Str
                 let w = 1.2 + 1.6 * s.clamp(0.0, 1.0);
                 o.insert("width".into(), json!((w * 10.0).round() / 10.0));
             }
-            if strength.is_some_and(|s| s < threshold) && !required {
+            // #1279: an information arc (into a decision) dotted
+            if decisions::information(&net, t) {
+                o.insert("style".into(), J::String("dotted".into()));
+                tip.push(format!("known when deciding {}", net.label(t)));
+            } else if strength.is_some_and(|s| s < threshold) && !required {
                 o.insert("style".into(), J::String("dashed".into()));
             }
             if !tip.is_empty() {
@@ -718,6 +748,9 @@ pub(crate) fn columns(rows: &[Row], options: &Row) -> Result<Vec<OutColumn>, Str
     }
     if groups.iter().any(|g| !g.is_null()) {
         cols.push(col("group", "CATEGORY", groups));
+    }
+    if utilities.iter().any(|u| !u.is_null()) {
+        cols.push(col("expected utility", "METRIC", utilities));
     }
     if !arcs.is_empty() {
         cols.push(col(

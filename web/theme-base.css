@@ -819,6 +819,8 @@ body.dark .dp-img-row.has-dark .dp-img-missing{display:none}
 .dp-tip-bn .tip-bn-delta{color:var(--ax-muted);font-size:.68rem}
 .dp-tip-bn .tip-bn-paths{margin:0 0 .2rem;font-weight:600}
 .dp-tip-bn .tip-bn-hint{color:var(--ax-muted);font-size:.7rem}
+.dp-tip-bn .tip-bn-chosen{font-weight:800}
+.dp-tip-bn .tip-bn-policy tr.tip-bn-seen td{background:color-mix(in srgb,var(--ax-muted) 14%,transparent)}
 /* a node's Markov blanket, the anchored node, the open paths to it */
 .panel svg rect.dp-bn-blanket{stroke:var(--ax-accent);stroke-width:2px}
 .panel svg rect.dp-bn-anchor{stroke:var(--ax-accent);stroke-width:2.4px;stroke-dasharray:5 3}

@@ -893,3 +893,42 @@ fn a_bayes_net_lints_through_check() {
     );
     assert!(w[1].contains("bayes_net/beliefs-sum"), "{w:?}");
 }
+
+/// #1279: an influence diagram — the decision's policy as a table in its
+/// box, information arcs dotted, a utility's expected value in its diamond,
+/// what to decide in the screen-reader text.
+#[test]
+fn a_bayes_net_draws_an_influence_diagrams_policy() {
+    let svg = bayes_net_svg(
+        serde_json::json!([
+            {"id": "seismic", "label": "Seismic", "kind": "chance", "states": ["closed", "diffuse"]},
+            {"id": "drill", "label": "Drill?", "kind": "decision", "states": ["drill", "walk away"]},
+            {"id": "payoff", "label": "Payoff", "kind": "utility"}
+        ]),
+        serde_json::json!({
+            "arcs": [{"from": "seismic", "to": "drill"}, {"from": "drill", "to": "payoff"}],
+            "beliefs": [{"node": "seismic", "state": "closed", "probability": 0.0},
+                        {"node": "seismic", "state": "diffuse", "probability": 1.0},
+                        {"node": "payoff", "expected_utility": -10}],
+            "evidence": [{"node": "seismic", "state": "diffuse"}],
+            "policy": [
+                {"decision": "drill", "parent_states": ["closed"], "option": "drill", "expected_utility": 87.5, "chosen": true},
+                {"decision": "drill", "parent_states": ["closed"], "option": "walk away", "expected_utility": 0, "chosen": false},
+                {"decision": "drill", "parent_states": ["diffuse"], "option": "drill", "expected_utility": -30.5, "chosen": false},
+                {"decision": "drill", "parent_states": ["diffuse"], "option": "walk away", "expected_utility": 0, "chosen": true}
+            ],
+        }),
+    );
+    for want in [
+        "dp-node-table-chosen",
+        "dp-node-table-current",
+        ">87.5<",
+        ">-30.5<",
+        "data-state=\"walk away\"",
+        ">-10<",
+        "decide Drill?: walk away (expected utility 0) given Seismic = diffuse",
+        "known when deciding Drill?",
+    ] {
+        assert!(svg.contains(want), "{want}: {svg}");
+    }
+}

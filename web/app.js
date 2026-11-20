@@ -1122,6 +1122,8 @@ const FILE_SAMPLES = [
   "examples/diagram-pipeline.sql",
   "examples/factor-graphs.sql",
   "examples/bayes-nets.sql",
+  "examples/bayes-oil-drill.sql",
+  "examples/bayes-printer-fix.sql",
   "examples/onboarding-quiz.sql",
   "examples/onboarding-tutorial.sql",
   "examples/theming-branded.sql",
@@ -22277,7 +22279,7 @@ function bnCard(el) {
   let kicker = kinds[bn.kind] || "Node";
   let evText = "";
   if (ev && ev.mode === "do" && ev.state != null) evText = `Set to ${ev.state} (an intervention): its causes no longer explain it.`;
-  else if (ev && ev.state != null) evText = `Observed: ${ev.state}.`;
+  else if (ev && ev.state != null) evText = bn.kind === "decision" ? `Decided: ${ev.state}.` : `Observed: ${ev.state}.`;
   else if (ev && ev.likelihood) evText = "Soft evidence: likelihood " + Object.entries(ev.likelihood).map(([s, l]) => `${s} ${l}`).join(", ") + ".";
   const hasPrior = bn.states.some((r) => r.prior != null);
   // #1276: the change since the evidence last changed
@@ -22338,6 +22340,10 @@ function bnCard(el) {
       `<table class="tip-bn-cpt" style="--bn:${escapeHtml(colour)}"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>` +
       (more > 0 ? `<div class="tip-trend">and ${more} more parent configurations</div>` : "");
   }
+  // #1279: a decision's policy — the expected utility of each option per
+  // configuration of its informational parents, the chosen one bold
+  const policy = bn.policy ? bnPolicyTable(bn.policy) : "";
+  const decides = policy && evMode ? "Click an option in the box to decide it (again: undo)." : "";
   return {
     card: true,
     bn: true,
@@ -22345,10 +22351,37 @@ function bnCard(el) {
     body:
       (evText ? `<p class="tip-note tip-bn-ev">${escapeHtml(evText)}</p>` : "") +
       (paths ? `<p class="tip-note tip-bn-paths">${escapeHtml(paths)}</p>` : "") +
-      beliefs +
+      (policy || beliefs) +
       table +
-      (hint ? `<p class="tip-note tip-bn-hint">${escapeHtml(hint)}</p>` : ""),
+      (decides ? `<p class="tip-note tip-bn-hint">${escapeHtml(decides)}</p>` : hint ? `<p class="tip-note tip-bn-hint">${escapeHtml(hint)}</p>` : ""),
   };
+}
+// #1279: a policy as the card's table (parents' states × options, expected
+// utilities, the chosen option bold, the configuration the evidence picks
+// marked).
+function bnPolicyTable(p) {
+  const options = Array.isArray(p.options) ? p.options : [];
+  const rows = Array.isArray(p.rows) ? p.rows : [];
+  if (!options.length || !rows.length) return "";
+  const parents = Array.isArray(p.parents) ? p.parents : [];
+  const shown = rows.slice(0, 12);
+  const width = Math.max(parents.length, ...shown.map((r) => (r.parents || []).length));
+  const num = (v) => (v == null || !Number.isFinite(v) ? "" : String(Math.round(v * 100) / 100));
+  const head = Array.from({ length: width }, (_, i) => `<th>${escapeHtml(parents[i] ?? "")}</th>`).join("") + options.map((o) => `<th class="tip-bn-num">${escapeHtml(o)}</th>`).join("");
+  const body = shown
+    .map((r, i) => {
+      const ps = r.parents || [];
+      const cells = Array.from({ length: width }, (_, k) => `<td>${escapeHtml(ps[k] ?? "")}</td>`).join("");
+      const eus = options.map((_, k) => `<td class="tip-bn-num${r.chosen === k ? " tip-bn-chosen" : ""}">${escapeHtml(num(Array.isArray(r.eu) ? r.eu[k] : null))}</td>`).join("");
+      return `<tr${p.current === i ? ' class="tip-bn-seen"' : ""}>${cells || "<td>expected</td>"}${eus}</tr>`;
+    })
+    .join("");
+  const more = (p.total || rows.length) - shown.length;
+  return (
+    `<div class="tip-bn-caption">${parents.length ? "Policy: expected utility of each option given what is known" : "Expected utility of each option"}</div>` +
+    `<table class="tip-bn-cpt tip-bn-policy"><thead><tr>${width ? head : "<th></th>" + head}</tr></thead><tbody>${body}</tbody></table>` +
+    (more > 0 ? `<div class="tip-trend">and ${more} more configurations</div>` : "")
+  );
 }
 
 // ---- #1276: a Bayesian network's interactive evidence ----
@@ -22396,12 +22429,14 @@ function bnToggle(sel, node, state, mode) {
 const bnLabel = (svg, id) => svg?.querySelector(`rect[data-node="${CSS.escape(id)}"]`)?.getAttribute("data-xtext") || id;
 // The state row under client y in node `id`'s box (its name and value carry
 // data-state), or null (the label above the rows).
-function bnRowAt(svg, id, y) {
+function bnRowAt(svg, id, y, x) {
   let best = null;
   for (const t of svg.querySelectorAll(`[data-of="${CSS.escape(id)}"] text[data-state]`)) {
     const r = t.getBoundingClientRect();
     const d = Math.abs(r.top + r.height / 2 - y);
-    if (!best || d < best.d) best = { d, h: r.height, state: t.getAttribute("data-state") };
+    // #1279: cells side by side on one row (a policy's options): the nearest in x
+    const dx = x == null ? 0 : Math.abs(r.left + r.width / 2 - x);
+    if (!best || d < best.d - 0.5 || (Math.abs(d - best.d) <= 0.5 && dx < best.dx)) best = { d, dx, h: r.height, state: t.getAttribute("data-state") };
   }
   return best && best.d <= Math.max(6, best.h * 0.75) ? best.state : null;
 }
@@ -22414,7 +22449,7 @@ function bnClick(el, e, sel) {
     bnPanel(sel, el);
     return true;
   }
-  const state = bnRowAt(svg, id, e.clientY);
+  const state = bnRowAt(svg, id, e.clientY, e.clientX);
   if (state != null) {
     bnToggle(sel, id, state, e.altKey ? "do" : null);
     return true;
