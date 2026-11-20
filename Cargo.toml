@@ -283,7 +283,6 @@ required-features = ["wasm"]
 # What changed and why: vendor/tiny_http/PATCHES.md.
 [patch.crates-io]
 tiny_http = { path = "vendor/tiny_http" }
-ggplot-rs = { path = "/home/simonm/projects/duckdb/scratch-1276/ggplot-rs" } # TEMP #1276
 
 # The wasm build only (web/pkg, `wasm-pack build --profile wasm …`, #312).
 # Separate from [profile.release] (native DuckDB extension + the `serve`/
