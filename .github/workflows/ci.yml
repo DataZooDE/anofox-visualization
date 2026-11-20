@@ -1067,6 +1067,12 @@ jobs:
         timeout-minutes: 10
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/view-col-width-e2e.mjs --url http://127.0.0.1:8947/
 
+      # scripts/setup-view-cache-e2e.mjs (#1304): a panel reading a variable
+      # only through a setup TEMP VIEW re-runs when it changes.
+      - name: Setup view variables re-run their panels e2e (#1304)
+        timeout-minutes: 5
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/setup-view-cache-e2e.mjs --url http://127.0.0.1:8947/
+
       # scripts/view-height-e2e.mjs (#573): a ::HEIGHT pending before a
       # ::VIEW group's first marker must apply to every alternative, not
       # just the first (the card jumped in height when switching) — an

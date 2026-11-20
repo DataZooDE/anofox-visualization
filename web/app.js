@@ -10430,7 +10430,18 @@ function paneShown(el) {
 }
 
 // The values of the variables a statement reads (getvariable), as one string.
-const varSig = (sql) => varsOf(sql).map((v) => `${v}=${dpVarNow[v] ?? ""}`).join("\u0001");
+// Also those read through a TEMP VIEW / TABLE / MACRO the setup made (#1304:
+// a panel reading `FROM thr`, a view over getvariable('lrn'), kept its cached
+// result when only `lrn` changed).
+const varSig = (sql) => sigVars(sql).map((v) => `${v}=${dpVarNow[v] ?? ""}`).join("\u0001");
+// Each object a setup statement created (lower case) -> the variables its
+// definition reads, through the objects it reads in turn.
+const dpObjVars = new Map();
+function sigVars(sql) {
+  const vars = new Set(varsOf(sql));
+  for (const [name, vs] of dpObjVars) if (readsAnyOf(sql, new Set([name]))) vs.forEach((v) => vars.add(v));
+  return [...vars].sort();
+}
 
 // Creating a new table / view / macro, or loading an extension, changes no
 // result a query already returned: the cache stays valid. Anything else (a
@@ -10457,6 +10468,7 @@ async function runSetup(sql, pv) {
   const name = made && made[1].toLowerCase();
   const additive = (made && !dpCreated.has(name)) || /^\s*(INSTALL|LOAD)\b/i.test(code);
   if (name) dpCreated.add(name);
+  if (name) dpObjVars.set(name.replace(/"/g, ""), new Set(sigVars(sql)));
   if (!additive || dpSetupRan.has(sql)) dpSetupEpoch++;
   dpSetupRan.set(sql, sig);
 }
@@ -10821,6 +10833,7 @@ async function runOnce(fresh = true, pv = preview) {
   if (fresh) {
     dpSetupRan = new Map();
     dpCreated = new Set();
+    dpObjVars.clear();
     dpResults.clear();
     servedCache.clear();
   }
