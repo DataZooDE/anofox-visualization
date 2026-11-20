@@ -3517,9 +3517,31 @@ fn render_dashboard_page(
             queried.next();
             captions.push_str(&c);
         }
-        // Its ::TITLE bar, as on a dashboard card (#232).
+        // A ::TABLE / ::PAGED / ::RECORD panel: its columns keep their own
+        // names (not `cN`), so `cols` above sees none of them — read the
+        // name-keyed rows through the shared table renderer, as `dashboard`
+        // does (#427). Otherwise its ::TITLE bar, as on a dashboard card (#232).
+        let table = panel
+            .roles
+            .iter()
+            .any(|(_, r)| matches!(r, Role::Table | Role::Record | Role::PagedTable));
         let svg = crate::host::catch_panic(|| {
-            render_with_title(&cols, &tracks, 460, 300, &opts).map_err(|e| e.to_string())
+            if table {
+                Ok(crate::dashboard::render_panel_doc_svg(
+                    &sql::result_columns(&rows),
+                    &panel.roles,
+                    &panel.names,
+                    460.0,
+                    300.0,
+                    &opts,
+                    false,
+                    &tracks,
+                    None,
+                    compact,
+                ))
+            } else {
+                render_with_title(&cols, &tracks, 460, 300, &opts).map_err(|e| e.to_string())
+            }
         })
         .unwrap_or_else(|e| {
             eprintln!(
