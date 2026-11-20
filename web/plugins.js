@@ -57,11 +57,23 @@ function callBytes(inst, fn, input) {
   return out;
 }
 
+// #1306: the role tokens of the plugins the server keeps — a panel carrying
+// one is drawn there (the page asks /api/panel for its picture).
+const serverTokens = new Set();
+export function serverRoleTokens() {
+  return serverTokens;
+}
+
 globalThis.anofoxPlugins = {
   // The core's drawing call: the plugin's answer (JSON text), or a throw.
   call(name, kind, input) {
     const p = plugins.get(name);
     if (!p) throw new Error("not loaded");
+    // #1306: its panels come drawn from the server; nothing runs here
+    if (p.server) {
+      if (kind === "lint") return "[]";
+      throw new Error("drawn on the server");
+    }
     const exp = EXPORTS[kind];
     if (!exp) throw new Error(`unknown call ${kind}`);
     try {
@@ -194,6 +206,21 @@ export async function loadPlugins(register, listUrl = "plugins.json", headers = 
   if (!Array.isArray(urls)) return [];
   const loaded = [];
   for (const entry of urls) {
+    // #1306: a plugin the server keeps — its roles only, no code
+    if (entry && typeof entry === "object" && entry.server === true && typeof entry.name === "string") {
+      try {
+        const why = register(JSON.stringify(entry.manifest || {}));
+        if (why) throw new Error(why);
+        plugins.set(entry.name, { server: true });
+        for (const r of (entry.manifest && entry.manifest.roles) || []) {
+          for (const t of [r.token, ...(r.aliases || [])]) if (typeof t === "string") serverTokens.add(t.toUpperCase());
+        }
+        loaded.push(entry.name);
+      } catch (e) {
+        console.warn(`plugin ${entry.name}: ${e.message || e}`);
+      }
+      continue;
+    }
     const u = typeof entry === "string" ? entry : entry && typeof entry.url === "string" ? entry.url : null;
     if (u === null) continue;
     const withAssets = typeof entry === "object" && entry.assets === true;

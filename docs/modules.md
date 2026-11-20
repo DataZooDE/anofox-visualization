@@ -191,6 +191,13 @@ A parameter's default is a literal (`NULL`, a number, `'text'`, `true`/`false`) 
 
 **Who can download a plugin.** A server with a login (`--auth`, `options.auth`) serves `plugins.json` and everything under `/modules/<name>/` only with a credential, also when embed links or shared dashboards are on (#1284): a signed-in viewer, or an embedded or shared page through its own session. Such a page has no cookie a `<script src>` could send, so it fetches each browser file with its session and puts it inline (a `<style>`, or a `<script type="module">` with the page's nonce): a plugin script there resolves a relative `import` against the page, not its own folder.
 
+**Keeping a plugin on the server** (#1306). On the locked server, list it as `{"path": "x.wasm", "browser": false}` in `options.plugins`. The page then gets only its manifest: its roles, plots and macros, so dashboards plan and check as usual, but no code. `plugins.json` lists it as `{"name", "server": true, "manifest"}`, and its `/modules/<name>/…` files answer 404 to everyone. Its panels are drawn on the server: the page asks `/api/panel` with `"draw": {"width", "height", "ctx"}` (its size and render context), and the first row of the answer carries the SVG (`"__anofox_svg"`), drawn by the same code and held to the same allow-list. Limits:
+- the picture is drawn at the dashboard's width and scaled to the card, so a `::HEIGHT` doesn't change its proportions;
+- it has no zoom or in-browser re-render (a chart-type switch, "charts as tables");
+- browser files (`assets`) are never loaded for it.
+
+Contract macros (`anofox_plot_*`) run in the server's SQL as before. Only the locked server takes this option; `serve --plugin` always hands its plugins to the page.
+
 ### The sandbox
 
 | What | How |

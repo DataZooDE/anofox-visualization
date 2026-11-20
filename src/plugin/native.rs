@@ -39,6 +39,9 @@ pub struct Plugin {
     macros: &'static [crate::macros::MacroSpec],
     plots: Vec<&'static str>,
     assets: &'static [(&'static str, &'static [u8])],
+    /// Its manifest, as the browser registers a server-only plugin (#1306):
+    /// roles, plots and macros — no code.
+    manifest: Json,
     engine: Engine,
     module: wasmi::Module,
     limits: Limits,
@@ -266,6 +269,12 @@ pub fn load_with(wasm: &[u8], limits: Limits, assets: bool) -> Result<&'static P
     let m: Json = serde_json::from_slice(&live.memory.data(&live.store)[at..at + n])
         .map_err(|e| format!("manifest: malformed JSON ({e})"))?;
     let man = manifest(&m)?;
+    // what the page needs to plan and check — nothing else of the manifest
+    let browser_manifest = json!({
+        "name": m.get("name"),
+        "roles": m.get("roles"),
+        "macros": m.get("macros").cloned().unwrap_or(json!([])),
+    });
     if !man.macros.is_empty() && live.render_contract.is_none() {
         return Err("declares macros but exports no anofox_plugin_render_contract".into());
     }
@@ -294,6 +303,7 @@ pub fn load_with(wasm: &[u8], limits: Limits, assets: bool) -> Result<&'static P
         macros: man.macros,
         plots: man.plots,
         assets: Box::leak(files.into_boxed_slice()),
+        manifest: browser_manifest,
         engine,
         module,
         limits,
@@ -314,22 +324,67 @@ pub fn register(wasm: &[u8], limits: Limits) -> Result<&'static str, String> {
     register_with(wasm, limits, false)
 }
 
-/// The registered plugins' own files, for the browser (#1213 step 3), and
-/// whether their browser files are served (#1290).
-static LOADED: Mutex<Vec<(&'static str, &'static [u8], bool)>> = Mutex::new(Vec::new());
+/// A registered plugin, as the servers hand it to the browser.
+#[derive(Clone)]
+struct Loaded {
+    name: &'static str,
+    /// Its WebAssembly, for the page to run — `None` for a server-only
+    /// plugin (#1306): the browser never gets it.
+    wasm: Option<&'static [u8]>,
+    /// Its browser files are served (#1290).
+    assets: bool,
+    /// A server-only plugin's manifest (the page registers its roles).
+    manifest: Option<&'static Json>,
+}
+
+/// The registered plugins' own files, for the browser (#1213 step 3).
+static LOADED: Mutex<Vec<Loaded>> = Mutex::new(Vec::new());
 
 /// [`register`]; `assets`: with its browser files (see [`load_with`]).
 pub fn register_with(wasm: &[u8], limits: Limits, assets: bool) -> Result<&'static str, String> {
     let p = load_with(wasm, limits, assets)?;
-    if let Ok(mut l) = LOADED.lock() {
-        l.push((
-            p.name,
-            Box::leak(wasm.to_vec().into_boxed_slice()),
-            !p.assets.is_empty(),
-        ));
-    }
+    remember(Loaded {
+        name: p.name,
+        wasm: Some(Box::leak(wasm.to_vec().into_boxed_slice())),
+        assets: !p.assets.is_empty(),
+        manifest: None,
+    });
     crate::module::register(p)?;
     Ok(p.name)
+}
+
+/// Load a plugin that stays on the server (#1306): its panels are drawn
+/// here and sent as SVG; the browser gets its roles (its manifest) but
+/// never its WebAssembly or browser files.
+pub fn register_server_only(wasm: &[u8], limits: Limits) -> Result<&'static str, String> {
+    let p = load_with(wasm, limits, false)?;
+    remember(Loaded {
+        name: p.name,
+        wasm: None,
+        assets: false,
+        manifest: Some(&p.manifest),
+    });
+    crate::module::register(p)?;
+    Ok(p.name)
+}
+
+/// [`register_server_only`] for the plugin file at `path`.
+pub fn register_file_server_only(path: &std::path::Path) -> Result<&'static str, String> {
+    let wasm = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    register_server_only(&wasm, Limits::default()).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+fn remember(l: Loaded) {
+    if let Ok(mut all) = LOADED.lock() {
+        all.push(l);
+    }
+}
+
+/// Is `name` a plugin the server keeps (#1306)?
+pub fn is_server_only(name: &str) -> bool {
+    LOADED
+        .lock()
+        .is_ok_and(|l| l.iter().any(|p| p.name == name && p.wasm.is_none()))
 }
 
 /// Load the plugin file at `path` and register it (without its browser files).
@@ -405,6 +460,32 @@ impl Module for Plugin {
     }
 }
 
+/// The roles of a statement that a server-only plugin draws (#1306), as the
+/// page's plan gives them (`[[column, "ROLE", name], …]`) — `None` when no
+/// role of it belongs to one.
+pub fn server_drawn_roles(p: &crate::sql::Panel) -> Option<String> {
+    let uses = p.roles.iter().any(|(_, r)| match r {
+        crate::Role::Module(id) => crate::module::name_of_role(*id).is_some_and(is_server_only),
+        _ => false,
+    });
+    uses.then(|| {
+        Json::from(
+            p.roles
+                .iter()
+                .map(|(i, r)| {
+                    let name = p
+                        .names
+                        .iter()
+                        .find(|(j, _)| j == i)
+                        .map_or("", |(_, n)| n.as_str());
+                    json!([i, r.token(), name])
+                })
+                .collect::<Vec<_>>(),
+        )
+        .to_string()
+    })
+}
+
 /// The browser's list of the registered plugins (`plugins.json`): their
 /// files' paths, `modules/<name>/plugin.wasm` — the page runs them in its
 /// own sandbox (step 3). Served without `--plugin-assets`: a plugin's
@@ -416,12 +497,16 @@ pub fn browser_list() -> String {
     let l = LOADED.lock().map(|l| l.clone()).unwrap_or_default();
     Json::from(
         l.iter()
-            .map(|(n, _, assets)| {
-                let url = format!("modules/{n}/plugin.wasm");
-                if *assets {
-                    json!({ "url": url, "assets": true })
-                } else {
-                    Json::from(url)
+            .map(|p| match (p.wasm, p.manifest) {
+                // #1306: roles only — the page asks the server to draw
+                (None, Some(m)) => json!({ "name": p.name, "server": true, "manifest": m }),
+                _ => {
+                    let url = format!("modules/{}/plugin.wasm", p.name);
+                    if p.assets {
+                        json!({ "url": url, "assets": true })
+                    } else {
+                        Json::from(url)
+                    }
                 }
             })
             .collect::<Vec<_>>(),
@@ -436,10 +521,5 @@ pub fn browser_wasm(path: &str) -> Option<&'static [u8]> {
         .trim_start_matches('/')
         .strip_prefix("modules/")?
         .strip_suffix("/plugin.wasm")?;
-    LOADED
-        .lock()
-        .ok()?
-        .iter()
-        .find(|(n, _, _)| *n == name)
-        .map(|(_, b, _)| *b)
+    LOADED.lock().ok()?.iter().find(|p| p.name == name)?.wasm
 }

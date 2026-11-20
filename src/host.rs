@@ -217,6 +217,31 @@ pub fn render_spec_checked(spec_json: &str, limits: &RenderLimits) -> Result<Str
     out
 }
 
+/// A panel drawn on the server, exactly as the page's `render_panel` would
+/// draw it (#1306: a server-only plugin's panel): its rows and roles as the
+/// page holds them, the size and the render context (`ctx`, the page's
+/// `renderCtx()`: theme, variant, locale) it asked for. Zoom and the
+/// browser's per-panel extras don't apply.
+pub fn render_panel_rows(
+    rows_json: &str,
+    roles_json: &str,
+    width: u32,
+    height: u32,
+    ctx: &str,
+) -> Result<String, String> {
+    crate::guard(|| {
+        let rows = crate::sql::parse_rows_json(rows_json).map_err(crate::RenderError::BadSpec)?;
+        let roles: serde_json::Value = serde_json::from_str(roles_json)
+            .map_err(|e| crate::RenderError::BadSpec(format!("roles JSON: {e}")))?;
+        let entries = crate::parse_role_entries(&roles).map_err(crate::RenderError::BadSpec)?;
+        let cols = crate::columns_from_entries(&rows, &entries);
+        let opts =
+            crate::RenderOptions::from_primary_arg(ctx).map_err(crate::RenderError::BadSpec)?;
+        crate::render_with(&cols, width.clamp(16, 4096), height.clamp(16, 4096), &opts)
+    })
+    .map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

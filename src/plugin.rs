@@ -374,6 +374,15 @@ pub fn render_input(cols: &[Column], width: u32, height: u32, o: &RenderOptions)
 pub(crate) fn checked_svg(name: &str, out: &Json) -> Result<String, String> {
     match (&out["ok"], &out["err"]) {
         (Json::String(svg), _) => {
+            // The page parses it as HTML, not XML: a CDATA section (or a
+            // comment) the XML check reads as text can turn into markup
+            // there — a <title>/<desc> is an HTML integration point (#1306
+            // security review). A drawing needs neither.
+            if svg.contains("<![CDATA[") || svg.contains("<!--") {
+                return Err(format!(
+                    "plugin {name}: its SVG contains a CDATA section or a comment"
+                ));
+            }
             let doc = format!(
                 "<svg xmlns=\"http://www.w3.org/2000/svg\" \
                  xmlns:xlink=\"http://www.w3.org/1999/xlink\">{svg}</svg>"
@@ -483,4 +492,24 @@ pub fn contract_answer_for_test(
     out: &Json,
 ) -> Result<crate::module::ContractAnswer, String> {
     contract_answer(name, out)
+}
+
+#[cfg(test)]
+mod svg_tests {
+    use super::*;
+
+    /// #1306 review: the page parses a plugin's SVG as HTML — a CDATA
+    /// section in a <title> would turn into markup there.
+    #[test]
+    fn a_plugin_svg_with_cdata_or_a_comment_is_refused() {
+        let ok = json!({"ok": "<g><title>a &lt;b&gt;</title><rect width=\"1\" height=\"1\"/></g>"});
+        assert!(checked_svg("p", &ok).is_ok());
+        for bad in [
+            "<title><![CDATA[ > <img src=x onerror=alert(1)> ]]></title>",
+            "<g><!-- x --></g>",
+        ] {
+            let e = checked_svg("p", &json!({ "ok": bad })).unwrap_err();
+            assert!(e.contains("CDATA section or a comment"), "{e}");
+        }
+    }
 }
