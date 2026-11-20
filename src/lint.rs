@@ -2137,12 +2137,13 @@ where
         );
 
         // #940: pixels, a ratio of the panel's width or a share of the window.
-        // (one inside a chart's SELECT is layout/inline-layout-role's)
+        // (one inside a chart's SELECT is layout/inline-layout-role's; one
+        // beside a ::SPAN counts too, #1286)
         if let Some((i, _)) = p
             .roles
             .iter()
             .find(|(_, r)| *r == Role::Height)
-            .filter(|_| p.roles.iter().all(|(_, r)| *r == Role::Height))
+            .filter(|_| crate::page::Slot::is_layout(&p.roles))
         {
             if let Some(t) = column_texts(&rows, *i).into_iter().next() {
                 if crate::height::PanelHeight::parse(&t).is_none() {

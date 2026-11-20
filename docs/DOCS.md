@@ -247,7 +247,7 @@ terminal.
 | `::SAVE_ACTION` |  | input | what a ::SAVE_SCENARIO save does: 'write' (default) the form's row into the picked scenario, 'create' a scenario named by ::SAVE_KEY from the picked one; for approvers 'freeze', 'unfreeze', 'merge' (make it official: previewed, conflicts refused) or 'drop' the picked one |
 | `::COLUMNS` | `::COLS` | layout | default panels per row |
 | `::SPAN` | `::COL`, `::WIDTH` | layout | next panel's width (of 12) |
-| `::HEIGHT` | `::TALL` | layout | next panel's height: px (320), a ratio of its width ('16:9', '0.5') or a share of the window ('40vh') |
+| `::HEIGHT` | `::TALL` | layout | next panel's height: px (320), a ratio of its width ('16:9', '0.5') or a share of the window ('40vh'); one statement may also set the ::SPAN |
 | `::ROWSELECT` | `::ROW_SELECT`, `::SELECTABLE` | layout | next table's row selection: 'none' (default), 'single' or 'multi' — a click sets getvariable('<first column>') |
 | `::TOTALS` | `::TOTAL`, `::AGGREGATE` | layout | next table's totals: 'sum'\|'mean'\|'median'\|'min'\|'max'\|'count'\|'none', or per column 'Revenue: sum; Per 10k: none' |
 | `::COLGROUP` | `::COL_GROUP`, `::HEADER_GROUP` | layout | next table's grouped header: 'Backtest: mae, rmse \| Holdout: mae_h, rmse_h' |
@@ -3479,7 +3479,7 @@ at the same data (Lines / Bars / Table, say) without leaving the layout:
 
 ```sql
 SELECT 'Lines' AS yoy ::VIEW;      -- opens group "yoy", view 0 (the default)
-SELECT 12::COL; SELECT 420::HEIGHT;
+SELECT 12::COL, 420::HEIGHT;
 SELECT week::XAXIS, revenue::LINECHART, 'Revenue'::TITLE FROM sales GROUP BY ALL ORDER BY 1;
 SELECT 'Bars' AS yoy ::VIEW;       -- the next alternative (repeating the alias is optional)
 SELECT week::XAXIS, revenue::BARCHART, 'Revenue'::TITLE FROM sales GROUP BY ALL ORDER BY 1;

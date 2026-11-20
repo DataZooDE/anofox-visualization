@@ -313,12 +313,7 @@ pub fn site_map_tiles(
     for step in &steps {
         let roles = &step.panel.roles;
         if roles.iter().any(|(_, r)| *r == Role::Height) {
-            height = step
-                .rows
-                .as_ref()
-                .ok()
-                .and_then(|r| first_text(r))
-                .and_then(|t| crate::height::PanelHeight::parse(&t));
+            height = height_of(&step.rows, roles);
             continue;
         }
         let pending = height.take();
@@ -363,6 +358,25 @@ pub fn site_map_tiles(
 /// The first cell of a result as text.
 fn first_text(rows: &[(String, Vec<Value>)]) -> Option<String> {
     rows.first().and_then(|(_, v)| v.first()).map(value_str)
+}
+
+/// The first row's cell of the column carrying `role`: a layout statement
+/// may set both `::SPAN` and `::HEIGHT` (#1286), each from its own column.
+fn role_text(rows: &[(String, Vec<Value>)], roles: &[(usize, Role)], role: Role) -> Option<String> {
+    let (i, _) = roles.iter().find(|(_, r)| *r == role)?;
+    rows.get(*i).and_then(|(_, v)| v.first()).map(value_str)
+}
+
+/// The `::HEIGHT` a layout statement sets, from its own column (#1286).
+fn height_of(
+    step_rows: &Result<Vec<(String, Vec<Value>)>, String>,
+    roles: &[(usize, Role)],
+) -> Option<crate::height::PanelHeight> {
+    step_rows
+        .as_ref()
+        .ok()
+        .and_then(|r| role_text(r, roles, Role::Height))
+        .and_then(|t| crate::height::PanelHeight::parse(&t))
 }
 
 /// Run a `::SHOW_IF` condition statement at plan index `idx` (#515): the
@@ -830,19 +844,20 @@ fn render_inner(
             }
             continue;
         }
-        if has(&|r| matches!(r, Role::Span)) {
-            if !one_col {
-                next_span = num().unwrap_or(0.0) as u32;
+        // `SELECT 12 ::SPAN, 680 ::HEIGHT;` sets both (#1286).
+        if has(&|r| matches!(r, Role::Span | Role::Height)) {
+            if has(&|r| matches!(r, Role::Span)) && !one_col {
+                next_span = step
+                    .rows
+                    .as_ref()
+                    .ok()
+                    .and_then(|r| role_text(r, roles, Role::Span))
+                    .and_then(|t| t.trim().parse::<f64>().ok())
+                    .unwrap_or(0.0) as u32;
             }
-            continue;
-        }
-        if has(&|r| matches!(r, Role::Height)) {
-            next_height = step
-                .rows
-                .as_ref()
-                .ok()
-                .and_then(|r| first_text(r))
-                .and_then(|t| crate::height::PanelHeight::parse(&t));
+            if has(&|r| matches!(r, Role::Height)) {
+                next_height = height_of(&step.rows, roles);
+            }
             continue;
         }
         if has(&|r| matches!(r, Role::TableOpt(TableOpt::Totals))) {
@@ -1192,15 +1207,17 @@ fn render_inner(
             let mut h = 0;
             while let Some(st) = steps.get(j) {
                 let r = &st.panel.roles;
-                let first = || {
+                // the ::HEIGHT column, also beside a ::SPAN (#1286)
+                let height = || {
+                    let (i, _) = r.iter().find(|(_, r)| *r == Role::Height)?;
                     st.rows.as_ref().ok().and_then(|rows| {
-                        rows.first()
+                        rows.get(*i)
                             .and_then(|(_, v)| v.first())
                             .and_then(|v| v.as_f64())
                     })
                 };
                 if r.iter().any(|(_, r)| *r == Role::Height) {
-                    h = first().unwrap_or(0.0).clamp(0.0, 2000.0) as u32;
+                    h = height().unwrap_or(0.0).clamp(0.0, 2000.0) as u32;
                 } else if crate::track::is_track(r) && captions.is_empty() {
                     // A track that failed (its optional input is missing) is
                     // left out.

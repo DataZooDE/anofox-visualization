@@ -3,7 +3,8 @@
 // height when switching views (247px -> 526px in the issue's own repro). An
 // alternative's own ::HEIGHT (set directly before its own marker) still
 // wins over the group's. Mirrors scripts/view-col-width-e2e.mjs (#470),
-// which already covers ::COL for a ::VIEW group the same way.
+// which already covers ::COL for a ::VIEW group the same way. Also #1286:
+// `SELECT 12::SPAN, 340::HEIGHT;` sets both, as two statements do.
 //
 //   cargo build --lib --target wasm32-unknown-unknown --profile wasm --no-default-features --features wasm
 //   wasm-bindgen --target web --out-dir web/pkg --out-name anofox_visualization <target>/wasm32-unknown-unknown/wasm/anofox_visualization.wasm
@@ -123,6 +124,25 @@ const clickAlt = (page, id, label) => page.click(`.dp-viewbar[data-view-id="${id
   check(hB.minHeight === 260, `(b) alternative B's own ::HEIGHT (260px, got ${hB.minHeight}) overrides the group's`);
   check(!errs.length, `(b) no page errors: ${errs.join(" | ")}`);
   await page.close();
+}
+
+// (c) #1286: one statement sets both ::SPAN and ::HEIGHT, as two do.
+{
+  const card = (sql) =>
+    open(`${sql}\nSELECT i::XAXIS, i::LINECHART, 'C'::TITLE FROM range(5) t(i);\n`).then(async ({ page, errs }) => {
+      const r = await page.evaluate(() => {
+        const c = document.querySelector(".dash .panel");
+        return c ? { minHeight: parseFloat(c.style.minHeight) || null, col: c.style.gridColumn } : {};
+      });
+      await page.close();
+      return { ...r, errs };
+    });
+  const one = await card("SELECT 12::SPAN, 340::HEIGHT;");
+  const two = await card("SELECT 12::SPAN;\nSELECT 340::HEIGHT;");
+  check(one.minHeight === 340, `(c) one statement: the ::HEIGHT applies (340px, got ${one.minHeight})`);
+  check(one.col === two.col && /12/.test(one.col || ""), `(c) one statement: the ::SPAN applies (${one.col} vs ${two.col})`);
+  check(two.minHeight === 340, `(c) two statements: 340px as before (got ${two.minHeight})`);
+  check(!one.errs.length && !two.errs.length, `(c) no page errors: ${[...one.errs, ...two.errs].join(" | ")}`);
 }
 
 await browser.close();

@@ -930,15 +930,18 @@ fn render_dashboard_html(
         let figure = p.roles.iter().any(|(_, r)| *r == Role::FigureStart);
         // Layout directives are interactive — the browser builder / `serve`
         // handle them; the static CLI output skips them (role registry).
-        if matches!(p.roles[..], [(_, Role::Span)] | [(_, Role::Height)]) {
-            let cell = exec(&format!("{};", p.sql))
+        if crate::page::Slot::is_layout(&p.roles) {
+            let row = exec(&format!("{};", crate::page::Slot::query(&p.roles, &p.sql)))
                 .ok()
-                .and_then(|r| r.first().and_then(|row| row.values().next().cloned()))
-                .map(|v| match v {
-                    serde_json::Value::String(s) => s,
-                    v => v.to_string(),
-                });
-            slot.read(&p.roles, cell.as_deref());
+                .and_then(|r| r.into_iter().next());
+            slot.read(&p.roles, |i| {
+                row.as_ref()
+                    .and_then(|r| r.get(&format!("c{i}")))
+                    .map(|v| match v {
+                        serde_json::Value::String(s) => s.clone(),
+                        v => v.to_string(),
+                    })
+            });
             continue;
         }
         if roles::is_directive_panel(&p.roles) && !section && !step_marker && !figure {
