@@ -251,3 +251,21 @@ SELECT anofox_plot_bayes_net(n,
        AS "Learned against the true network"
 FROM (VALUES ('size', 'Large account'), ('engaged', 'Engaged'), ('discount', 'Got the discount'),
              ('price', 'Price rose'), ('usage', 'Uses it weekly'), ('stay', 'Renewed')) n(id, label);
+
+-- @tile Clarifying a learned graph | An arc the data can't orient (`status` `'undirected'`) has no arrowheads and takes the colour of the bootstrap's lean; one an expert's answer set (`'expert'`) carries a ✓ badge with who, and who, when and why on hover. Experts answer through a `::FORM` and `::SAVE` into an `answers` table.
+SELECT 'bayes-net'::REQUIRES;
+SELECT 12::COL;
+CREATE TABLE cg_nodes AS
+SELECT * FROM (VALUES ('smoke', 'Smoker'), ('lung', 'Lung cancer'), ('bronc', 'Bronchitis'), ('dysp', 'Short of breath')) t(id, label),
+              (SELECT 'chance' AS kind, ['yes', 'no'] AS states);
+CREATE TABLE cg_beliefs AS
+SELECT node, s.state, CASE s.state WHEN 'yes' THEN p ELSE 1 - p END AS probability, CASE s.state WHEN 'yes' THEN p ELSE 1 - p END AS prior
+FROM (VALUES ('smoke', 0.5), ('lung', 0.055), ('bronc', 0.45), ('dysp', 0.436)) t(node, p), (VALUES ('yes'), ('no')) s(state);
+SELECT anofox_plot_bayes_net(n,
+         arcs := [{'from': 'smoke', 'to': 'lung', 'status': 'expert', 'who': 'dr-a', 'when': '2026-11-12',
+                   'rationale': 'the smoking comes first'},
+                  {'from': 'smoke', 'to': 'bronc', 'status': 'undirected', 'lean': 0.52},
+                  {'from': 'lung', 'to': 'dysp', 'status': 'directed'}, {'from': 'bronc', 'to': 'dysp', 'status': 'directed'}],
+         beliefs := (SELECT list(b) FROM cg_beliefs b))
+       AS "Smoking and bronchitis: which way? The data can't tell"
+FROM cg_nodes n;

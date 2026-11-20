@@ -1125,6 +1125,7 @@ const FILE_SAMPLES = [
   "examples/bayes-nets.sql",
   "examples/bayes-oil-drill.sql",
   "examples/bayes-printer-fix.sql",
+  "examples/bayes-clarify.sql",
   "examples/onboarding-quiz.sql",
   "examples/onboarding-tutorial.sql",
   "examples/theming-branded.sql",
@@ -14410,7 +14411,7 @@ function formFieldOk(f, v) {
   if (f.type === "toggle") return typeof v === "boolean";
   if (f.type === "distribution") return distOk(f, v);
   if (typeof v !== "string" || v.length > 500) return false;
-  if (f.type === "dropdown") return f.options.includes(v);
+  if (f.type === "dropdown" || f.type === "buttons") return f.options.includes(v);
   if (f.type === "date") return isIsoDate(v);
   return true;
 }
@@ -14691,13 +14692,47 @@ function makeFormField(meta, f, vals, commit, commitMany) {
     row._distBody = makeDistBody(meta, f, cur, fam, commit);
   } else if (f.type === "dropdown") {
     input = document.createElement("select");
-    for (const o of f.options) {
+    f.options.forEach((o, k) => {
       const opt = document.createElement("option");
-      opt.value = opt.textContent = o;
+      opt.value = o;
+      opt.textContent = (f.labels && f.labels[k]) || o; // #1282: a label per option
       if (o === cur) opt.selected = true;
       input.appendChild(opt);
-    }
+    });
     input.onchange = () => commit(f.key, input.value, input);
+  } else if (f.type === "buttons") {
+    // #1282: one of a few options as a row of buttons, one pressed (a radio
+    // group: arrow keys move between them)
+    input = document.createElement("div");
+    input.className = "dp-seg";
+    input.setAttribute("role", "radiogroup");
+    lab.id = id + "-label";
+    input.setAttribute("aria-labelledby", lab.id);
+    const btns = f.options.map((o, k) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = (f.labels && f.labels[k]) || o;
+      b.dataset.option = o;
+      b.setAttribute("role", "radio");
+      const on = o === cur;
+      b.setAttribute("aria-checked", on ? "true" : "false");
+      b.tabIndex = on || (cur == null && k === 0) ? 0 : -1;
+      refocus(`form:${meta.varname}:${f.key}:${k}`, b);
+      b.onclick = () => {
+        if (o === cur) return;
+        commit(f.key, o, null);
+        dpRefocus = `form:${meta.varname}:${f.key}:${k}`;
+      };
+      return b;
+    });
+    input.addEventListener("keydown", (e) => {
+      const step = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[e.key];
+      if (!step) return;
+      e.preventDefault();
+      const at = btns.indexOf(document.activeElement);
+      btns[(at + step + btns.length) % btns.length].click();
+    });
+    input.append(...btns);
   } else if (f.type === "toggle") {
     input = document.createElement("input");
     input.type = "checkbox";
@@ -14761,7 +14796,7 @@ function makeFormField(meta, f, vals, commit, commitMany) {
     input.onchange = () => commit(f.key, input.value === "" ? null : input.value, input);
   }
   input.id = id;
-  input.className = "dp-form-input";
+  input.classList.add("dp-form-input");
   refocus(`form:${meta.varname}:${f.key}`, input);
   const box = document.createElement("div");
   box.className = "dp-form-control";

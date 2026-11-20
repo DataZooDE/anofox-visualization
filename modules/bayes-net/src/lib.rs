@@ -11,6 +11,7 @@ use serde_json::{Map, Value as J};
 
 mod bayes_net;
 mod causal;
+mod clarify;
 
 type Row = Map<String, J>;
 
@@ -37,6 +38,7 @@ impl Plugin for BayesNet {
             ("policy", "NULL"),
             ("adjust", "NULL"),
             ("reference", "NULL"),
+            ("answers", "NULL"),
             ("threshold", "0.5"),
             ("direction", "'TB'"),
             ("width", "900"),
@@ -51,6 +53,7 @@ impl Plugin for BayesNet {
             ContractOption { key: "policy", param: "policy", fallback_var: None },
             ContractOption { key: "adjust", param: "adjust", fallback_var: None },
             ContractOption { key: "reference", param: "reference", fallback_var: None },
+            ContractOption { key: "answers", param: "answers", fallback_var: None },
             ContractOption { key: "threshold", param: "threshold", fallback_var: None },
             ContractOption { key: "direction", param: "direction", fallback_var: None },
         ],
@@ -83,7 +86,13 @@ colour; beliefs with a world column (factual | counterfactual) draw the twin net
 above threshold) against it: matching, extra, reversed, missing dashed, and the structural Hamming distance. Lint: \
 cycles, unknown ids, beliefs not summing to 1, unknown states, bad modes or likelihoods, path steps along no arc or \
 out of order, policy options, parent_states and chosen options that do not fit, adjustment sets that leave a \
-back-door path open or hold a node downstream of the treatment.",
+back-door path open or hold a node downstream of the treatment. \
+Clarifying a learned \
+graph: an arc's status undirected (the data can't orient it) is drawn without arrowheads, coloured by lean (the \
+share of bootstrap resamples pointing from → to: accent when at least 70 % one way, amber otherwise); status expert \
+(set by an answer) carries a ✓ badge with who, and who, when and rationale on hover; answers := a LIST of (a, b, \
+answer: a_to_b | b_to_a | no_arc | unsure, who, when, rationale) is linted for unknown nodes, unknown answers and \
+answers that would close a cycle with the directed arcs (the cycle named).",
         example: "SELECT anofox_plot_bayes_net(n, arcs := [{'from': 'rain', 'to': 'grass'}], beliefs := \
 [{'node': 'rain', 'state': 'yes', 'probability': 0.2}, {'node': 'rain', 'state': 'no', 'probability': 0.8}]) FROM \
 (VALUES ('rain', 'Rain', 'chance', ['yes', 'no']), ('grass', 'Wet grass', 'chance', ['yes', 'no'])) \
@@ -101,6 +110,8 @@ n(id, label, kind, states)",
         let mut columns = bayes_net::columns(rows, options)?;
         // #1278: adjustment sets, the structure diff
         causal::decorate(&mut columns, rows, options)?;
+        // #1282: undirected and expert-set arcs
+        clarify::decorate(&mut columns, options)?;
         let mut root_attrs = bayes_net::root_attrs(options)?;
         root_attrs.extend(causal::root_attrs(options)?);
         // the network as drawn (a twin's two worlds as two nodes each)

@@ -100,7 +100,7 @@ pub struct Diagnostic {
     /// `form/bad-value` | `form/bad-range` |
     /// `form/slider-range` | `form/duplicate-field` | `form/no-key` |
     /// `form/too-many-fields` | `form/bad-width` | `form/partial-sections` |
-    /// `form/unknown-layout` (#1233)
+    /// `form/unknown-layout` (#1233) | `form/bad-labels` (#1282)
     /// (warnings).
     /// `::FIGURE` blocks ([`figure_diags`], #661): `figure/unclosed` |
     /// `figure/nested` | `figure/not-a-chart` | `figure/bad-option` |
