@@ -4,7 +4,11 @@
 //   (a) draws a ::HELLO panel through it,
 //   (b) draws its contract macro, anofox_plot_hello(t, greeting := …),
 //   (c) refuses a plugin that imports anything (the page still works),
-//   (d) without the plugin, a dashboard that ::REQUIRES it says so.
+//   (d) without the plugin, a dashboard that ::REQUIRES it says so,
+//   (e) a plugin listed with {url, assets: true} gets its manifest's browser
+//       files loaded from modules/<name>/ (hello.js runs), and
+//   (f) one listed by its URL alone does not, though the files are there
+//       (#1290: the server lists the object only with --plugin-assets).
 //
 //   NODE_PATH=<dir with playwright>/node_modules node scripts/plugins-browser-e2e.mjs \
 //       --plugin hello_plugin.wasm [--web web] [--vendor web/vendor] [--port 8971]
@@ -46,9 +50,15 @@ const site = (name, list) => {
   if (list) writeFileSync(path.join(d, "plugins.json"), JSON.stringify(list));
   return d;
 };
-const withPlugin = site("with", ["modules/hello/plugin.wasm", "modules/bad/plugin.wasm"]);
-mkdirSync(path.join(withPlugin, "modules", "hello"), { recursive: true });
-writeFileSync(path.join(withPlugin, "modules", "hello", "plugin.wasm"), readFileSync(plugin));
+// the example plugin's browser files, as `serve --plugin-assets` serves them
+const helloFiles = (d) => {
+  mkdirSync(path.join(d, "modules", "hello"), { recursive: true });
+  writeFileSync(path.join(d, "modules", "hello", "plugin.wasm"), readFileSync(plugin));
+  writeFileSync(path.join(d, "modules", "hello", "hello.css"), ".hello { font-style: italic; }\n");
+  writeFileSync(path.join(d, "modules", "hello", "hello.js"), 'document.documentElement.dataset.helloPlugin = "loaded";\n');
+};
+const withPlugin = site("with", [{ url: "modules/hello/plugin.wasm", assets: true }, "modules/bad/plugin.wasm"]);
+helloFiles(withPlugin);
 // (c) a module that imports a function: refused before it runs
 mkdirSync(path.join(withPlugin, "modules", "bad"), { recursive: true });
 writeFileSync(
@@ -57,6 +67,8 @@ writeFileSync(
   Buffer.from([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x04, 0x01, 0x60, 0x00, 0x00, 0x02, 0x0d, 0x01, 0x03, 0x65, 0x6e, 0x76, 0x05, 0x66, 0x65, 0x74, 0x63, 0x68, 0x00, 0x00])
 );
 const without = site("without", null);
+const noAssets = site("noassets", ["modules/hello/plugin.wasm"]);
+helloFiles(noAssets);
 
 const types = { ".js": "text/javascript", ".mjs": "text/javascript", ".wasm": "application/wasm", ".json": "application/json", ".html": "text/html", ".css": "text/css", ".svg": "image/svg+xml" };
 const serve = (root, p) =>
@@ -76,12 +88,15 @@ const serve = (root, p) =>
   });
 const s1 = await serve(withPlugin, port);
 const s2 = await serve(without, port + 1);
+const s3 = await serve(noAssets, port + 2);
 
 const browser = await chromium.launch();
 async function open(base, sql, panels = true) {
   const page = await browser.newPage({ viewport: { width: 1200, height: 900 } });
   const errs = [];
   const warns = [];
+  const asked = [];
+  page.on("request", (r) => asked.push(new URL(r.url()).pathname));
   page.on("pageerror", (e) => errs.push(String(e)));
   page.on("console", (m) => {
     if (m.type() === "warning") warns.push(m.text());
@@ -90,15 +105,15 @@ async function open(base, sql, panels = true) {
   if (process.env.E2E_DEBUG) page.on("pageerror", (e) => console.log("pageerror:", String(e).slice(0, 300)));
   if (process.env.E2E_DEBUG) page.on("response", (r) => r.status() >= 400 && console.log("HTTP", r.status(), r.url()));
   await page.goto(`${base}?embed=1#sql=${b64(sql)}`);
-  if (!panels) return { page, errs, warns };
+  if (!panels) return { page, errs, warns, asked };
   await page.waitForSelector(".dash .panel", { timeout: 120000 });
   await page.waitForFunction(() => !document.body.classList.contains("loading") && !document.querySelector(".dash .panel.dp-skel, .dash .panel.placeholder"), null, { timeout: 120000 });
-  return { page, errs, warns };
+  return { page, errs, warns, asked };
 }
 try {
   const base = `http://127.0.0.1:${port}/`;
   // (a) + (b)
-  let { page, errs, warns } = await open(
+  let { page, errs, warns, asked } = await open(
     base,
     "SELECT 'hello'::REQUIRES;\nSELECT 'Ada' AS who ::HELLO, 'Greeting'::TITLE;\n" +
       "SELECT anofox_plot_hello(t, greeting := 'Servus') AS \"Contract\" FROM (VALUES ('Max')) t(name);\n"
@@ -108,6 +123,21 @@ try {
   check(/Servus, Max!/.test(text), "(b) its contract macro is drawn by the plugin");
   check(warns.some((w) => /modules\/bad\/plugin\.wasm: imports env::fetch/.test(w)), `(c) a plugin with an import is refused (${warns.join(" | ").slice(0, 200)})`);
   check(errs.length === 0, `no page errors (${errs.join(" | ")})`);
+  // (e) its browser files: requested and run
+  const ran = await page
+    .waitForFunction(() => document.documentElement.dataset.helloPlugin === "loaded", null, { timeout: 30000 })
+    .then(() => true, () => false);
+  check(asked.includes("/modules/hello/hello.js") && ran, `(e) the plugin's hello.js is requested and runs (${asked.filter((p) => p.startsWith("/modules/")).join(", ")})`);
+  check(asked.includes("/modules/hello/hello.css"), "(e) … and its hello.css is linked");
+  await page.close();
+  // (f) listed without assets: its browser files are not loaded
+  ({ page, errs, asked } = await open(`http://127.0.0.1:${port + 2}/`, "SELECT 'hello'::REQUIRES;\nSELECT 'Ada' AS who ::HELLO;\n"));
+  const text3 = await page.evaluate(() => document.querySelector(".dash").textContent);
+  check(/Hello, Ada!/.test(text3), "(f) the plugin still draws");
+  check(
+    !asked.some((p) => /^\/modules\/hello\/hello\.(js|css)$/.test(p)) && !(await page.evaluate(() => document.documentElement.dataset.helloPlugin)),
+    `(f) without assets: true its browser files are not loaded (${asked.filter((p) => p.startsWith("/modules/")).join(", ")})`
+  );
   await page.close();
   // (d) no plugin: ::REQUIRES says so
   ({ page, errs } = await open(`http://127.0.0.1:${port + 1}/`, "SELECT 'hello'::REQUIRES;\nSELECT 'Ada' AS who ::HELLO;\n", false));
@@ -120,6 +150,7 @@ try {
   await browser.close();
   s1.close();
   s2.close();
+  s3.close();
   rmSync(W, { recursive: true, force: true });
 }
 console.log(`plugins-browser-e2e: ${bad} failed`);

@@ -314,14 +314,19 @@ pub fn register(wasm: &[u8], limits: Limits) -> Result<&'static str, String> {
     register_with(wasm, limits, false)
 }
 
-/// The registered plugins' own files, for the browser (#1213 step 3).
-static LOADED: Mutex<Vec<(&'static str, &'static [u8])>> = Mutex::new(Vec::new());
+/// The registered plugins' own files, for the browser (#1213 step 3), and
+/// whether their browser files are served (#1290).
+static LOADED: Mutex<Vec<(&'static str, &'static [u8], bool)>> = Mutex::new(Vec::new());
 
 /// [`register`]; `assets`: with its browser files (see [`load_with`]).
 pub fn register_with(wasm: &[u8], limits: Limits, assets: bool) -> Result<&'static str, String> {
     let p = load_with(wasm, limits, assets)?;
     if let Ok(mut l) = LOADED.lock() {
-        l.push((p.name, Box::leak(wasm.to_vec().into_boxed_slice())));
+        l.push((
+            p.name,
+            Box::leak(wasm.to_vec().into_boxed_slice()),
+            !p.assets.is_empty(),
+        ));
     }
     crate::module::register(p)?;
     Ok(p.name)
@@ -403,12 +408,22 @@ impl Module for Plugin {
 /// The browser's list of the registered plugins (`plugins.json`): their
 /// files' paths, `modules/<name>/plugin.wasm` — the page runs them in its
 /// own sandbox (step 3). Served without `--plugin-assets`: a plugin's
-/// WebAssembly can't reach the page; its JS and CSS can.
+/// WebAssembly can't reach the page; its JS and CSS can. A plugin whose
+/// browser files are served (`--plugin-assets`) is listed as
+/// `{"url": …, "assets": true}`: the page then loads its manifest's
+/// `assets` from `modules/<name>/` like a linked module's (#1290).
 pub fn browser_list() -> String {
     let l = LOADED.lock().map(|l| l.clone()).unwrap_or_default();
     Json::from(
         l.iter()
-            .map(|(n, _)| format!("modules/{n}/plugin.wasm"))
+            .map(|(n, _, assets)| {
+                let url = format!("modules/{n}/plugin.wasm");
+                if *assets {
+                    json!({ "url": url, "assets": true })
+                } else {
+                    Json::from(url)
+                }
+            })
             .collect::<Vec<_>>(),
     )
     .to_string()
@@ -425,6 +440,6 @@ pub fn browser_wasm(path: &str) -> Option<&'static [u8]> {
         .lock()
         .ok()?
         .iter()
-        .find(|(n, _)| *n == name)
-        .map(|(_, b)| *b)
+        .find(|(n, _, _)| *n == name)
+        .map(|(_, b, _)| *b)
 }

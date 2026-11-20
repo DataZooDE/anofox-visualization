@@ -102,8 +102,15 @@ impl Plugin for Hello {
         Ok(ContractOutput::Svg(svg))
     }
 
-    const ASSETS: &'static [(&'static str, &'static [u8])] =
-        &[("hello.css", b".hello { font-style: italic; }\n")];
+    // Browser files: served (and loaded by the page) only with the
+    // operator's --plugin-assets. hello.js marks the page it ran in.
+    const ASSETS: &'static [(&'static str, &'static [u8])] = &[
+        ("hello.css", b".hello { font-style: italic; }\n"),
+        (
+            "hello.js",
+            b"document.documentElement.dataset.helloPlugin = \"loaded\";\n",
+        ),
+    ];
 
     fn lint(columns: &[Column]) -> Vec<String> {
         match columns.iter().find(|c| c.role == "HELLO") {

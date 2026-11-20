@@ -45,7 +45,7 @@ import init, {
   version as wasmVersion,
   AskSession,
 } from "./pkg/anofox_visualization.js";
-import { loadPlugins } from "./plugins.js";
+import { loadPlugins, loadAssetFiles } from "./plugins.js";
 import { animKit } from "./anim.js";
 import { keepMathCase } from "./nocase.js";
 import { addCopyButtons, wireCopyButtons } from "./copycode.js";
@@ -7679,19 +7679,7 @@ function loadModuleAssets() {
   } catch (_) {
     return;
   }
-  for (const p of paths) {
-    if (/\.css$/i.test(p)) {
-      const l = document.createElement("link");
-      l.rel = "stylesheet";
-      l.href = p;
-      document.head.appendChild(l);
-    } else if (/\.m?js$/i.test(p)) {
-      const sc = document.createElement("script");
-      sc.type = "module";
-      sc.src = p;
-      document.head.appendChild(sc);
-    }
-  }
+  loadAssetFiles(paths);
 }
 function loadRoleSets() {
   try {
