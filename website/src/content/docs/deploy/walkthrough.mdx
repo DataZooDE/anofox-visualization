@@ -1,0 +1,41 @@
+---
+title: A walkthrough of the locked server
+description: A one-minute recording of a locked server — the dashboard list, an input, two viewers under a row policy, a shared save and an export.
+---
+
+import video from "../../../assets/walkthrough/locked-server.webm?url";
+import poster from "../../../assets/walkthrough/locked-server-poster.webp?url";
+
+What a viewer of a [locked server](../locked-server/) sees, recorded on a local server with made-up data. There is no hosted demo: the server is meant to run next to your data, behind your login.
+
+<video controls muted playsinline preload="metadata" src={video} poster={poster} width="1280" height="800" style="width: 100%; height: auto; border-radius: 8px; border: 1px solid var(--sl-color-gray-5);">
+  Your browser can't play this WebM video.
+</video>
+
+## What it shows
+
+| Time | What you see |
+|---|---|
+| 0:00 | **The dashboard list.** The server serves a folder of SQL dashboards; viewers can't run SQL of their own. alice is signed in through an auth proxy. |
+| 0:09 | **A dashboard with an input.** alice sees two regions, North and East: the row policy hides the rest. |
+| 0:14 | **The input re-runs the panels.** She picks another product; the server runs the dashboard's own SQL with her choice. |
+| 0:22 | **A second viewer.** The same dashboard, signed in as bob: one region, South — other rows, same SQL. |
+| 0:28 | **Write-back.** A `::FORM` and a `::SAVE` button: alice sets next quarter's target for North and saves it. |
+| 0:43 | **The save shows everywhere.** Every panel that reads `targets` re-runs with the saved row, stamped with who saved it. |
+| 0:48 | **Export.** The same dashboard as an SVG from `/api/export`, under the same login and policy (also PNG, PDF and a panel's CSV). |
+
+## How it was set up
+
+One DuckDB process with three small tables (`sales`, `targets`, and `access`, which says who may see which region) and two dashboards in a folder:
+
+- **Login:** an [auth proxy](../security/) in front of the server sends a shared secret and the user's name. In the recording, the browser sends those headers itself, so switching the header switches the viewer.
+- **Row policy:** `sales` and `targets` get the same rule, `region IN (SELECT region FROM access WHERE viewer = getvariable('__claim_user'))`. The server rewrites every query with it — the panels, the inputs' options, the saves and the exports.
+- **Write-back:** `options.writeback` declares the `targets` table, its columns and who may save. The `::SAVE` button sends the `::FORM`'s values; the server checks them against the declared types and the policy, appends them to its change log and stamps the row with the writer's name.
+
+The script that starts the server and records the video is [`scripts/record-walkthrough.mjs`](https://github.com/DataZooDE/anofox-visualization/blob/master/scripts/record-walkthrough.mjs); its header says how to re-record it.
+
+## Read on
+
+- [The locked server](../locked-server/): how to start it, the options, refresh and replicas.
+- [Login and row policies](../security/): the login methods and the policy file.
+- [Embedding in your app](../embedding/): the same dashboards inside your own pages.
