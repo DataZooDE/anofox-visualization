@@ -224,3 +224,30 @@ SELECT anofox_plot_bayes_net(n,
          policy := (SELECT list(p) FROM id_policy p))
        AS "Drill unless the test reads diffuse; test first"
 FROM id_nodes n;
+
+-- @tile Which paths to block | `adjust :=` marks a causal question on the network: the treatment X, the outcome Y, the adjustment set ringed. The back-door path through Engaged is dashed, with a bar where adjusting for it blocks it; the causal paths are in the accent colour.
+SELECT 'bayes-net'::REQUIRES;
+SELECT 12::COL;
+CREATE TABLE cz_tile_nodes AS
+SELECT * FROM (VALUES ('engaged', 'Engaged'), ('discount', 'Got the discount'), ('usage', 'Uses it weekly'), ('stay', 'Renewed')) t(id, label),
+              (SELECT 'chance' AS kind, ['yes', 'no'] AS states);
+SELECT anofox_plot_bayes_net(n,
+         arcs := [{'from': 'engaged', 'to': 'discount'}, {'from': 'engaged', 'to': 'stay'},
+                  {'from': 'discount', 'to': 'usage'}, {'from': 'usage', 'to': 'stay'}, {'from': 'discount', 'to': 'stay'}],
+         adjust := [{'treatment': 'discount', 'outcome': 'stay', 'set_id': 'minimal', 'node': 'engaged', 'kind': 'minimal'}])
+       AS "From the discount to renewal: adjust for engagement"
+FROM cz_tile_nodes n;
+
+-- @tile Did a learner find it | `reference :=` compares a learned network with the true or expert one: matching arcs grey, a reversed one in the accent colour, an extra one amber, a missed one dashed red; the legend counts them and ends with the structural Hamming distance. Drive `threshold :=` with a slider.
+SELECT 'bayes-net'::REQUIRES;
+SELECT 12::COL;
+SELECT anofox_plot_bayes_net(n,
+         arcs := [{'from': 'size', 'to': 'engaged', 'strength': 0.97}, {'from': 'engaged', 'to': 'discount', 'strength': 0.94},
+                  {'from': 'stay', 'to': 'usage', 'strength': 0.66}, {'from': 'price', 'to': 'usage', 'strength': 0.55},
+                  {'from': 'discount', 'to': 'stay', 'strength': 0.31}],
+         reference := [{'from': 'size', 'to': 'engaged'}, {'from': 'engaged', 'to': 'discount'},
+                       {'from': 'usage', 'to': 'stay'}, {'from': 'discount', 'to': 'stay'}],
+         threshold := 0.5)
+       AS "Learned against the true network"
+FROM (VALUES ('size', 'Large account'), ('engaged', 'Engaged'), ('discount', 'Got the discount'),
+             ('price', 'Price rose'), ('usage', 'Uses it weekly'), ('stay', 'Renewed')) n(id, label);

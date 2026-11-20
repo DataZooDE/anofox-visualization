@@ -222,6 +222,12 @@ FROM ${v("('src','Orders CSV',NULL),('clean','Clean','src'),('agg','Daily totals
 
 \`anofox_plot_bayes_net(nodes, arcs := …, beliefs := …, evidence := …, tables := …)\` draws a Bayesian network through \`::DIAGRAM\`, top to bottom with arrows at the child: a box per node with a bar per state for what the network believes, the prior as a faint bar behind it, observed nodes shaded with their state in bold; decisions as square boxes, utilities as diamonds, deterministic nodes with a double outline. Arcs are wider the stronger they are and dashed when weak. Hovering a node shows its belief against the prior and its conditional probability table. The tables are what an engine exports (pgmpy, bnlearn, a DuckDB extension); \`--check\` names cycles, unknown ids and beliefs that don't sum to 1. Bayesian networks are a plugin like factor graphs: a dashboard that draws one starts with \`SELECT 'bayes-net'::REQUIRES;\`.
 
-[A small one in the gallery ↗](../../../gallery/features/#a-bayesian-network) · [two networks in the builder ↗](../../../app/?dashboard=what-does-the-evidence-say-about-the-cause)`,
+[A small one in the gallery ↗](../../../gallery/features/#a-bayesian-network) · [two networks in the builder ↗](../../../app/?dashboard=what-does-the-evidence-say-about-the-cause)
+
+## Causal views
+
+The same macro answers causal questions. \`adjust := …\` (treatment, outcome, set_id, node, kind) marks the treatment X and the outcome Y, rings the adjustment set, draws the back-door paths dashed — red when open, a bar where the set blocks them — and the causal paths in the accent colour. Beliefs with a \`world\` column draw the counterfactual twin: the factual and the counterfactual world side by side, the nodes the change does not reach shared between them. \`reference := …\` compares a learned network with an expert one: matching, extra, missing and reversed arcs, and the structural Hamming distance. Seeing against doing, effects with intervals and total = direct + indirect are charts over the producer's tables.
+
+[Two tiles in the gallery ↗](../../../gallery/features/#which-paths-to-block) · [the whole story in the builder ↗](../../../app/?dashboard=does-the-discount-keep-customers)`,
   },
 };

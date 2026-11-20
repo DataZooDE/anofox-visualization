@@ -10,6 +10,7 @@ use anofox_viz_plugin::{
 use serde_json::{Map, Value as J};
 
 mod bayes_net;
+mod causal;
 
 type Row = Map<String, J>;
 
@@ -34,6 +35,8 @@ impl Plugin for BayesNet {
             ("tables", "NULL"),
             ("paths", "NULL"),
             ("policy", "NULL"),
+            ("adjust", "NULL"),
+            ("reference", "NULL"),
             ("threshold", "0.5"),
             ("direction", "'TB'"),
             ("width", "900"),
@@ -46,6 +49,8 @@ impl Plugin for BayesNet {
             ContractOption { key: "tables", param: "tables", fallback_var: None },
             ContractOption { key: "paths", param: "paths", fallback_var: None },
             ContractOption { key: "policy", param: "policy", fallback_var: None },
+            ContractOption { key: "adjust", param: "adjust", fallback_var: None },
+            ContractOption { key: "reference", param: "reference", fallback_var: None },
             ContractOption { key: "threshold", param: "threshold", fallback_var: None },
             ContractOption { key: "direction", param: "direction", fallback_var: None },
         ],
@@ -79,10 +84,25 @@ n(id, label, kind, states)",
     }];
 
     fn render_contract(input: &ContractInput) -> Result<ContractOutput, String> {
+        // #1278: the counterfactual twin network, when the beliefs come in
+        // two worlds
+        let twin = causal::twin(&input.rows, &input.options)?;
+        let (rows, options) = match &twin {
+            Some((r, o)) => (r.as_slice(), o),
+            None => (input.rows.as_slice(), &input.options),
+        };
+        let mut columns = bayes_net::columns(rows, options)?;
+        // #1278: adjustment sets, the structure diff
+        causal::decorate(&mut columns, rows, options)?;
+        let mut root_attrs = bayes_net::root_attrs(options)?;
+        root_attrs.extend(causal::root_attrs(options)?);
+        // the network as drawn (a twin's two worlds as two nodes each)
+        let mut warnings = bayes_net::lint(rows, options);
+        warnings.extend(causal::lint(&input.rows, &input.options));
         Ok(ContractOutput::Columns {
-            columns: bayes_net::columns(&input.rows, &input.options)?,
-            root_attrs: bayes_net::root_attrs(&input.options)?,
-            warnings: bayes_net::lint(&input.rows, &input.options),
+            columns,
+            root_attrs,
+            warnings,
         })
     }
 }

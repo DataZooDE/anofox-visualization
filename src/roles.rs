@@ -111,11 +111,11 @@ pub static REGISTRY: &[RoleSpec] = &[
     e("LANE", &["SWIMLANE"], R::Lane, "encoding", true,
       "a ::DIAGRAM node's swimlane: nodes of one lane share a labelled band"),
     e("BELIEF", &["NODE_BELIEF"], R::Belief, "encoding", true,
-      "a ::DIAGRAM node's belief: JSON {lo, hi, its: [[iteration, mean, sd], …], prior: [mean, sd]} — a density curve over the node, re-shaped per iteration by the message steps; the optional prior a dashed outline behind it; or a discrete node's {kind, states: [{state, p, prior, was}, …], evidence: {state, mode}, cpt} — a bar per state in the box, the prior faint behind it, the change since was after it, a node with evidence shaded, one set (mode do) with a hand (a Bayesian network)"),
+      "a ::DIAGRAM node's belief: JSON {lo, hi, its: [[iteration, mean, sd], …], prior: [mean, sd]} — a density curve over the node, re-shaped per iteration by the message steps; the optional prior a dashed outline behind it; or a discrete node's {kind, states: [{state, p, prior, was}, …], evidence: {state, mode}, cpt} — a bar per state in the box, the prior faint behind it, the change since was after it, a node with evidence shaded, one set (mode do) with a hand (a Bayesian network); causal: treatment / outcome / mediator (X, Y, M in a badge) or adjust (ringed), world (a twin network's), note (a line in its card)"),
     e("SHAPE", &["NODE_SHAPE"], R::Shape, "encoding", true,
       "a ::DIAGRAM node's mark: box, rect, diamond, double-box, circle, filled-circle, square, filled-square, terminal, text — or a factor graph's kind (factor, variable, data, equality, delta, constant; these make a factor graph: lanes as straight bands, undirected edges) or a Bayesian network's (chance, decision, utility)"),
     e("EDGES", &[], R::Edges, "encoding", true,
-      "a ::DIAGRAM's edges: (SELECT list({'from': a, 'to': b, 'value': n, 'label': t, 'style': 'flow', 'status': 'delayed'}) FROM e) — width by value (or 'width' in px), colour by status, 'tip' the hover text, 'cut': true drawn grey with a break mark"),
+      "a ::DIAGRAM's edges: (SELECT list({'from': a, 'to': b, 'value': n, 'label': t, 'style': 'flow', 'status': 'delayed'}) FROM e) — width by value (or 'width' in px), colour by status, 'tip' the hover text, 'cut': true drawn grey with a break mark, 'color' (a status word, accent, a palette slot or #rrggbb), 'blocked': true a bar across it, 'key' its entry in a legend under the graph ('caption' ends the legend)"),
     // ── charts (cast the measure column) ───────────────────────────────────
     e("BARCHART", &["BAR"], R::Value(Kind::Bar), "chart", true,
       "bar chart (dodged by CATEGORY)"),

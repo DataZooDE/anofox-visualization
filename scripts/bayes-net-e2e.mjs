@@ -308,6 +308,94 @@ if (shot) {
   }
 }
 
+// ---- #1278: causal views ("Does the discount keep customers?") ------------
+// The adjustment set on the DAG (X, Y, the ring, blocked back-door paths,
+// the legend), no set (the paths open, red), seeing or doing by clicking,
+// the twin network (three lanes, what the change did), the structure diff
+// (the distance on the root, the legend; the slider lets the weak arc in).
+const causalUrl = arg("--causal-page", base + "?dashboard=does-the-discount-keep-customers");
+await page.goto(causalUrl);
+await page.waitForFunction(() => document.querySelectorAll("svg[data-diagram]").length >= 2, null, { timeout: 120000 });
+await page.waitForTimeout(500);
+const causal = (k) =>
+  page.evaluate((k) => {
+    const svg = document.querySelectorAll("svg[data-diagram]")[k];
+    return {
+      ring: [...svg.querySelectorAll(".dp-node-ring")].map((r) => r.closest("[data-of]")?.getAttribute("data-of")),
+      letters: [...svg.querySelectorAll("text.dp-node-icon")].map((t) => t.closest("[data-of]")?.getAttribute("data-of") + ":" + t.textContent),
+      blocked: [...svg.querySelectorAll('polyline[data-blocked="1"]')].map((e) => e.getAttribute("data-edge")).sort(),
+      keys: [...svg.querySelectorAll(".dp-edge-legend text")].map((t) => t.textContent),
+      open: [...svg.querySelectorAll('polyline[data-key="back-door path, open"]')].map((e) => e.getAttribute("data-edge")).sort(),
+      lanes: [...new Set([...svg.querySelectorAll("[data-lane]")].map((e) => e.getAttribute("data-lane")))],
+      shd: svg.getAttribute("data-bn-shd"),
+      summary: svg.getAttribute("data-summary") || "",
+    };
+  }, k);
+let c = await causal(0);
+check(JSON.stringify(c.ring) === '["engaged"]', "the minimal set: Engaged customer ringed", c);
+check(c.letters.includes("discount:X") && c.letters.includes("stay:Y"), "X on the treatment, Y on the outcome", c);
+check(JSON.stringify(c.blocked) === '["engaged>stay","engaged>usage"]', "the back-door paths blocked after Engaged", c);
+check(c.keys.join("|") === "back-door path, blocked|causal path", "the legend", c.keys);
+c = await causal(1);
+check(c.letters.includes("usage:M") && c.open.length === 2, "engagement unmeasured: the front-door mediator M, the back-door path open", c);
+await page.locator('select:has(option[value="none"])').first().selectOption("none");
+await page.waitForFunction(() => !document.querySelectorAll("svg[data-diagram]")[0].querySelector(".dp-node-ring"), null, { timeout: 30000 }).catch(() => {});
+c = await causal(0);
+check(!c.ring.length && c.open.includes("engaged>stay"), "no adjustment: nothing ringed, the back-door path open", c);
+await page.locator('svg[data-diagram] rect[data-node="discount"]').first().hover();
+await page.waitForTimeout(200);
+const kicker = await page.evaluate(() => document.querySelector(".dp-tip.show .tip-kicker")?.textContent || "");
+check(/Treatment \(X\)/.test(kicker), "the card names the treatment", kicker);
+await page.mouse.move(5, 5);
+await clickAt(await rowAt(0, "discount", "yes"));
+let seen = await state(0);
+await clickAt(await rowAt(0, "discount", "yes"), { alt: true });
+let done = await state(0);
+check(seen.vals["stay.yes"] && done.vals["stay.yes"] && seen.vals["stay.yes"] !== done.vals["stay.yes"] && done.hand, "seeing then doing: renewal differs, a hand on the discount", [seen.vals, done.vals]);
+await page.getByText("What if", { exact: true }).first().click();
+await page.waitForFunction(() => [...document.querySelectorAll("svg[data-diagram]")].some((s) => s.querySelector('[data-lane="Counterfactual world"]')), null, { timeout: 60000 }).catch(() => {});
+const twin = await page.evaluate(() => {
+  const svg = [...document.querySelectorAll("svg[data-diagram]")].find((s) => s.querySelector('[data-lane="Counterfactual world"]'));
+  return svg ? { summary: svg.getAttribute("data-summary") || "", copies: svg.querySelectorAll('rect[data-node$="*"]').length, hand: !!svg.querySelector('[data-of="discount*"] .dp-node-icon, [data-of="discount*"].dp-node-icon') } : null;
+});
+check(twin && twin.copies === 3 && /^If Got the discount had been set to no: /.test(twin.summary), "the twin: three counterfactual copies, what the change did", twin);
+// a fresh page: after the dropdown change above a slider change does not
+// re-run the tab (#1304)
+await page.goto(causalUrl);
+await page.waitForFunction(() => document.querySelectorAll("svg[data-diagram]").length >= 2, null, { timeout: 120000 });
+await page.getByText("Did a learner find it", { exact: true }).first().click();
+await page.waitForFunction(() => !!document.querySelector("svg[data-bn-shd]"), null, { timeout: 60000 }).catch(() => {});
+const diff = () =>
+  page.evaluate(() => {
+    const svg = document.querySelector("svg[data-bn-shd]");
+    return svg ? { shd: svg.getAttribute("data-bn-shd"), keys: [...svg.querySelectorAll(".dp-edge-legend text")].map((t) => t.textContent) } : null;
+  });
+let d = await diff();
+check(d && d.shd === "3" && d.keys.join("|") === "matching (6)|reversed (1)|extra (1)|missing (1)|structural Hamming distance 3", "the structure diff at 0.5", d);
+const slider = page.locator("#dp-form-cz_learn-threshold");
+if (await slider.count()) {
+  // a click at about 0.3 (snaps to a 0.05 step: 0.25 or 0.3)
+  await slider.scrollIntoViewIfNeeded();
+  await page.waitForTimeout(1500);
+  const sb = await slider.boundingBox();
+  await page.mouse.click(sb.x + sb.width * 0.3, sb.y + sb.height / 2);
+  await page.waitForFunction(() => document.querySelector("svg[data-bn-shd]")?.textContent.includes("matching (7)"), null, { timeout: 30000 }).catch(() => {});
+  d = await diff();
+  check(d && d.keys[0] === "matching (7)" && d.keys.includes("extra (2)") && !d.keys.some((k) => k.startsWith("missing")), "lower, the weak arc matches and another extra one comes in", d);
+}
+if (shot) {
+  for (const scheme of ["light", "dark"]) {
+    await page.emulateMedia({ colorScheme: scheme });
+    await page.waitForTimeout(600);
+    for (const [tab, name] of [["Seeing or doing", "adjust"], ["What if", "twin"], ["Did a learner find it", "diff"]]) {
+      await page.getByText(tab, { exact: true }).first().click();
+      await page.waitForTimeout(2500);
+      await page.mouse.move(5, 5);
+      await page.screenshot({ path: `${shot}-${scheme}-causal-${name}.png`, fullPage: true });
+    }
+  }
+}
+
 check(!errors.length, "no page errors", errors);
 await browser.close();
 if (bad) {

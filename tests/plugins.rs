@@ -851,6 +851,85 @@ fn a_bayes_net_draws_evidence_changes_do_and_paths() {
     }
 }
 
+/// #1278: the causal views through the host — an adjustment set (X, Y, a
+/// ring, a blocked back-door path, the legend), a twin network (lanes, the
+/// story across the worlds), a structure diff (the distance on the root).
+#[test]
+fn a_bayes_net_draws_adjustment_sets_twins_and_structure_diffs() {
+    let node = |id: &str, label: &str| serde_json::json!({"id": id, "label": label, "kind": "chance", "states": ["yes", "no"]});
+    let nodes = serde_json::json!([
+        node("z", "Engaged"),
+        node("x", "Discount"),
+        node("y", "Renewed")
+    ]);
+    let arcs = serde_json::json!([{"from": "z", "to": "x"}, {"from": "z", "to": "y"}, {"from": "x", "to": "y"}]);
+    let svg = bayes_net_svg(
+        nodes.clone(),
+        serde_json::json!({
+            "arcs": arcs,
+            "adjust": [{"treatment": "x", "outcome": "y", "set_id": "minimal", "node": "z", "kind": "minimal"}],
+        }),
+    );
+    for want in [
+        "dp-node-ring",
+        ">X<",
+        ">Y<",
+        "dp-edge-block",
+        ">back-door path, blocked<",
+        ">causal path<",
+        "Discount ← Engaged → Renewed: blocked at Engaged",
+    ] {
+        assert!(svg.contains(want), "{want}: {svg}");
+    }
+    // the twin: beliefs in two worlds, a do on the treatment
+    let b = |n: &str, p: f64, w: &str| {
+        [
+            serde_json::json!({"node": n, "state": "yes", "probability": p, "world": w}),
+            serde_json::json!({"node": n, "state": "no", "probability": 1.0 - p, "world": w}),
+        ]
+    };
+    let mut beliefs = Vec::new();
+    for (n, f, c) in [("z", 0.8, 0.8), ("x", 1.0, 0.0), ("y", 1.0, 0.8)] {
+        beliefs.extend(b(n, f, "factual"));
+        beliefs.extend(b(n, c, "counterfactual"));
+    }
+    let svg = bayes_net_svg(
+        nodes.clone(),
+        serde_json::json!({
+            "arcs": arcs,
+            "beliefs": beliefs,
+            "evidence": [{"node": "x", "state": "yes"}, {"node": "y", "state": "yes"},
+                         {"node": "x", "state": "no", "mode": "do"}],
+        }),
+    );
+    for want in [
+        "data-lane=\"Factual world\"",
+        "data-lane=\"Counterfactual world\"",
+        "data-lane=\"Shared by both worlds\"",
+        "If Discount had been set to no: Renewed yes 80% (as it happened 100%)",
+        "data-cut=\"1\"",
+    ] {
+        assert!(svg.contains(want), "{want}: {svg}");
+    }
+    // the diff: one reversed, one missing
+    let svg = bayes_net_svg(
+        nodes,
+        serde_json::json!({
+            "arcs": [{"from": "x", "to": "z", "strength": 0.9}, {"from": "x", "to": "y", "strength": 0.8}],
+            "reference": arcs,
+        }),
+    );
+    for want in [
+        "data-bn-shd=\"2\"",
+        ">reversed (1)<",
+        ">missing (1)<",
+        ">matching (1)<",
+        ">structural Hamming distance 2<",
+    ] {
+        assert!(svg.contains(want), "{want}: {svg}");
+    }
+}
+
 #[test]
 fn a_bayes_net_needs_node_ids() {
     let svg = bayes_net_svg(serde_json::json!([{"what": 1}]), serde_json::json!({}));

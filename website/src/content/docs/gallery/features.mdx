@@ -46,6 +46,8 @@ import t19l from "../../../assets/gallery/features/19-light.webp";
 import t19d from "../../../assets/gallery/features/19-dark.webp";
 import t20l from "../../../assets/gallery/features/20-light.webp";
 import t20d from "../../../assets/gallery/features/20-dark.webp";
+import t21l from "../../../assets/gallery/features/21-light.webp";
+import t21d from "../../../assets/gallery/features/21-dark.webp";
 
 Beyond single charts: clicks that filter and drill, switchable views, composed figures, guided steps, annotations from data, diagrams, factor graphs, Bayesian networks and their automatic analysis — each a few lines of SQL.
 
@@ -559,6 +561,61 @@ FROM id_nodes n;
 ```
 
 <a class="gal-edit" href="../../app/?mode=edit#sql=Q1JFQVRFIFRBQkxFIGdlbyBBUyBTRUxFQ1QgKiBGUk9NIChWQUxVRVMKICAoJ0VVJywnR2VybWFueScsJ0JlcmxpbicpLCgnRVUnLCdHZXJtYW55JywnTXVuaWNoJyksKCdFVScsJ0ZyYW5jZScsJ1BhcmlzJyksKCdFVScsJ0ZyYW5jZScsJ0x5b24nKSwKICAoJ0FtZXJpY2FzJywnVVNBJywnTmV3IFlvcmsnKSwoJ0FtZXJpY2FzJywnVVNBJywnQ2hpY2FnbycpLCgnQW1lcmljYXMnLCdDYW5hZGEnLCdUb3JvbnRvJyksCiAgKCdBUEFDJywnSmFwYW4nLCdUb2t5bycpLCgnQVBBQycsJ0phcGFuJywnT3Nha2EnKSwoJ0FQQUMnLCdBdXN0cmFsaWEnLCdTeWRuZXknKSkgdChyZWdpb24sIGNvdW50cnksIGNpdHkpOwpDUkVBVEUgVEFCTEUgb3JkZXJzIEFTClNFTEVDVCBEQVRFICcyMDI2LTAxLTA1JyArICg3ICogdyk6OklOVCBBUyB3ZWVrLCBnLnJlZ2lvbiwgZy5jb3VudHJ5LCBnLmNpdHksIGMuY2hhbm5lbCwKICAgICAgIChhYnMoaGFzaChnLmNpdHkgfHwgYy5jaGFubmVsIHx8IHcpKSAlIDYwICsgMjAgKyAyICogdykgQVMgcmV2ZW51ZQpGUk9NIGdlbyBnLCAoVkFMVUVTICgnd2ViJyksICgnYXBwJyksICgnc3RvcmUnKSkgYyhjaGFubmVsKSwgcmFuZ2UoMjYpIHIodyk7ClNFTEVDVCAyOjpDT0xVTU5TOwoKU0VMRUNUICdiYXllcy1uZXQnOjpSRVFVSVJFUzsKU0VMRUNUIDEyOjpDT0w7CkNSRUFURSBUQUJMRSBpZF9ub2RlcyBBUwpTRUxFQ1QgKiBGUk9NIChWQUxVRVMgKCd0ZXN0JywgJ1Rlc3Q/JywgJ2RlY2lzaW9uJywgWyd0ZXN0JywgJ25vIHRlc3QnXSksICgnb2lsJywgJ09pbCcsICdjaGFuY2UnLCBbJ2RyeScsICd3ZXQnLCAnc29ha2luZyddKSwKICAgICAgICAgICAgICAgICAgICAgICgnc2Vpc21pYycsICdTZWlzbWljJywgJ2NoYW5jZScsIFsnY2xvc2VkJywgJ29wZW4nLCAnZGlmZnVzZScsICdub25lJ10pLAogICAgICAgICAgICAgICAgICAgICAgKCdkcmlsbCcsICdEcmlsbD8nLCAnZGVjaXNpb24nLCBbJ2RyaWxsJywgJ3dhbGsgYXdheSddKSwgKCdwYXlvZmYnLCAnUGF5b2ZmJywgJ3V0aWxpdHknLCBbXTo6VkFSQ0hBUltdKSkgdChpZCwgbGFiZWwsIGtpbmQsIHN0YXRlcyk7CkNSRUFURSBUQUJMRSBpZF9wb2xpY3kgQVMKU0VMRUNUIGQgQVMgZGVjaXNpb24sIHBzIEFTIHBhcmVudF9zdGF0ZXMsIG8gQVMgb3B0aW9uLCBldSBBUyBleHBlY3RlZF91dGlsaXR5LCBjIEFTIGNob3NlbgpGUk9NIChWQUxVRVMgKCd0ZXN0JywgW106OlZBUkNIQVJbXSwgJ3Rlc3QnLCAyMi41LCB0cnVlKSwgKCd0ZXN0JywgW10sICdubyB0ZXN0JywgMjAsIGZhbHNlKSwKICAgICAgICAgICAgICgnZHJpbGwnLCBbJ25vIHRlc3QnLCAnbm9uZSddLCAnZHJpbGwnLCAyMCwgdHJ1ZSksICgnZHJpbGwnLCBbJ25vIHRlc3QnLCAnbm9uZSddLCAnd2FsayBhd2F5JywgMCwgZmFsc2UpLAogICAgICAgICAgICAgKCdkcmlsbCcsIFsndGVzdCcsICdjbG9zZWQnXSwgJ2RyaWxsJywgNzcuNSwgdHJ1ZSksICgnZHJpbGwnLCBbJ3Rlc3QnLCAnY2xvc2VkJ10sICd3YWxrIGF3YXknLCAtMTAsIGZhbHNlKSwKICAgICAgICAgICAgICgnZHJpbGwnLCBbJ3Rlc3QnLCAnb3BlbiddLCAnZHJpbGwnLCAyMi45LCB0cnVlKSwgKCdkcmlsbCcsIFsndGVzdCcsICdvcGVuJ10sICd3YWxrIGF3YXknLCAtMTAsIGZhbHNlKSwKICAgICAgICAgICAgICgnZHJpbGwnLCBbJ3Rlc3QnLCAnZGlmZnVzZSddLCAnZHJpbGwnLCAtNDAuNSwgZmFsc2UpLCAoJ2RyaWxsJywgWyd0ZXN0JywgJ2RpZmZ1c2UnXSwgJ3dhbGsgYXdheScsIC0xMCwgdHJ1ZSkpIHQoZCwgcHMsIG8sIGV1LCBjKTsKU0VMRUNUIGFub2ZveF9wbG90X2JheWVzX25ldChuLAogICAgICAgICBhcmNzIDo9IFt7J2Zyb20nOiAnb2lsJywgJ3RvJzogJ3NlaXNtaWMnfSwgeydmcm9tJzogJ3Rlc3QnLCAndG8nOiAnc2Vpc21pYyd9LCB7J2Zyb20nOiAndGVzdCcsICd0byc6ICdkcmlsbCd9LAogICAgICAgICAgICAgICAgICB7J2Zyb20nOiAnc2Vpc21pYycsICd0byc6ICdkcmlsbCd9LCB7J2Zyb20nOiAnb2lsJywgJ3RvJzogJ3BheW9mZid9LCB7J2Zyb20nOiAnZHJpbGwnLCAndG8nOiAncGF5b2ZmJ31dLAogICAgICAgICBiZWxpZWZzIDo9IFt7J25vZGUnOiAnb2lsJywgJ3N0YXRlJzogJ2RyeScsICdwcm9iYWJpbGl0eSc6IDAuNX0sIHsnbm9kZSc6ICdvaWwnLCAnc3RhdGUnOiAnd2V0JywgJ3Byb2JhYmlsaXR5JzogMC4zfSwKICAgICAgICAgICAgICAgICAgICAgeydub2RlJzogJ29pbCcsICdzdGF0ZSc6ICdzb2FraW5nJywgJ3Byb2JhYmlsaXR5JzogMC4yfSwKICAgICAgICAgICAgICAgICAgICAgeydub2RlJzogJ3NlaXNtaWMnLCAnc3RhdGUnOiAnY2xvc2VkJywgJ3Byb2JhYmlsaXR5JzogMC4yNH0sIHsnbm9kZSc6ICdzZWlzbWljJywgJ3N0YXRlJzogJ29wZW4nLCAncHJvYmFiaWxpdHknOiAwLjM1fSwKICAgICAgICAgICAgICAgICAgICAgeydub2RlJzogJ3NlaXNtaWMnLCAnc3RhdGUnOiAnZGlmZnVzZScsICdwcm9iYWJpbGl0eSc6IDAuNDF9LCB7J25vZGUnOiAnc2Vpc21pYycsICdzdGF0ZSc6ICdub25lJywgJ3Byb2JhYmlsaXR5JzogMH0sCiAgICAgICAgICAgICAgICAgICAgIHsnbm9kZSc6ICdwYXlvZmYnLCAnc3RhdGUnOiBOVUxMLCAncHJvYmFiaWxpdHknOiBOVUxMLCAnZXhwZWN0ZWRfdXRpbGl0eSc6IDMyLjV9XSwKICAgICAgICAgcG9saWN5IDo9IChTRUxFQ1QgbGlzdChwKSBGUk9NIGlkX3BvbGljeSBwKSkKICAgICAgIEFTICJEcmlsbCB1bmxlc3MgdGhlIHRlc3QgcmVhZHMgZGlmZnVzZTsgdGVzdCBmaXJzdCIKRlJPTSBpZF9ub2RlcyBuOwo=">Edit it in the builder ↗</a>
+
+</div>
+</div>
+
+<div class="gal-tile">
+<div class="gal-pic"><img class="lp-light" src={t21l.src} alt="" loading="lazy" /><img class="lp-dark" src={t21d.src} alt="" loading="lazy" /></div>
+<div class="gal-text">
+
+### Which paths to block
+
+`adjust :=` marks a causal question on the network: the treatment X, the outcome Y, the adjustment set ringed. The back-door path through Engaged is dashed, with a bar where adjusting for it blocks it; the causal paths are in the accent colour.
+
+```sql
+SELECT 'bayes-net'::REQUIRES;
+SELECT 12::COL;
+CREATE TABLE cz_tile_nodes AS
+SELECT * FROM (VALUES ('engaged', 'Engaged'), ('discount', 'Got the discount'), ('usage', 'Uses it weekly'), ('stay', 'Renewed')) t(id, label),
+              (SELECT 'chance' AS kind, ['yes', 'no'] AS states);
+SELECT anofox_plot_bayes_net(n,
+         arcs := [{'from': 'engaged', 'to': 'discount'}, {'from': 'engaged', 'to': 'stay'},
+                  {'from': 'discount', 'to': 'usage'}, {'from': 'usage', 'to': 'stay'}, {'from': 'discount', 'to': 'stay'}],
+         adjust := [{'treatment': 'discount', 'outcome': 'stay', 'set_id': 'minimal', 'node': 'engaged', 'kind': 'minimal'}])
+       AS "From the discount to renewal: adjust for engagement"
+FROM cz_tile_nodes n;
+```
+
+<a class="gal-edit" href="../../app/?mode=edit#sql=Q1JFQVRFIFRBQkxFIGdlbyBBUyBTRUxFQ1QgKiBGUk9NIChWQUxVRVMKICAoJ0VVJywnR2VybWFueScsJ0JlcmxpbicpLCgnRVUnLCdHZXJtYW55JywnTXVuaWNoJyksKCdFVScsJ0ZyYW5jZScsJ1BhcmlzJyksKCdFVScsJ0ZyYW5jZScsJ0x5b24nKSwKICAoJ0FtZXJpY2FzJywnVVNBJywnTmV3IFlvcmsnKSwoJ0FtZXJpY2FzJywnVVNBJywnQ2hpY2FnbycpLCgnQW1lcmljYXMnLCdDYW5hZGEnLCdUb3JvbnRvJyksCiAgKCdBUEFDJywnSmFwYW4nLCdUb2t5bycpLCgnQVBBQycsJ0phcGFuJywnT3Nha2EnKSwoJ0FQQUMnLCdBdXN0cmFsaWEnLCdTeWRuZXknKSkgdChyZWdpb24sIGNvdW50cnksIGNpdHkpOwpDUkVBVEUgVEFCTEUgb3JkZXJzIEFTClNFTEVDVCBEQVRFICcyMDI2LTAxLTA1JyArICg3ICogdyk6OklOVCBBUyB3ZWVrLCBnLnJlZ2lvbiwgZy5jb3VudHJ5LCBnLmNpdHksIGMuY2hhbm5lbCwKICAgICAgIChhYnMoaGFzaChnLmNpdHkgfHwgYy5jaGFubmVsIHx8IHcpKSAlIDYwICsgMjAgKyAyICogdykgQVMgcmV2ZW51ZQpGUk9NIGdlbyBnLCAoVkFMVUVTICgnd2ViJyksICgnYXBwJyksICgnc3RvcmUnKSkgYyhjaGFubmVsKSwgcmFuZ2UoMjYpIHIodyk7ClNFTEVDVCAyOjpDT0xVTU5TOwoKU0VMRUNUICdiYXllcy1uZXQnOjpSRVFVSVJFUzsKU0VMRUNUIDEyOjpDT0w7CkNSRUFURSBUQUJMRSBjel90aWxlX25vZGVzIEFTClNFTEVDVCAqIEZST00gKFZBTFVFUyAoJ2VuZ2FnZWQnLCAnRW5nYWdlZCcpLCAoJ2Rpc2NvdW50JywgJ0dvdCB0aGUgZGlzY291bnQnKSwgKCd1c2FnZScsICdVc2VzIGl0IHdlZWtseScpLCAoJ3N0YXknLCAnUmVuZXdlZCcpKSB0KGlkLCBsYWJlbCksCiAgICAgICAgICAgICAgKFNFTEVDVCAnY2hhbmNlJyBBUyBraW5kLCBbJ3llcycsICdubyddIEFTIHN0YXRlcyk7ClNFTEVDVCBhbm9mb3hfcGxvdF9iYXllc19uZXQobiwKICAgICAgICAgYXJjcyA6PSBbeydmcm9tJzogJ2VuZ2FnZWQnLCAndG8nOiAnZGlzY291bnQnfSwgeydmcm9tJzogJ2VuZ2FnZWQnLCAndG8nOiAnc3RheSd9LAogICAgICAgICAgICAgICAgICB7J2Zyb20nOiAnZGlzY291bnQnLCAndG8nOiAndXNhZ2UnfSwgeydmcm9tJzogJ3VzYWdlJywgJ3RvJzogJ3N0YXknfSwgeydmcm9tJzogJ2Rpc2NvdW50JywgJ3RvJzogJ3N0YXknfV0sCiAgICAgICAgIGFkanVzdCA6PSBbeyd0cmVhdG1lbnQnOiAnZGlzY291bnQnLCAnb3V0Y29tZSc6ICdzdGF5JywgJ3NldF9pZCc6ICdtaW5pbWFsJywgJ25vZGUnOiAnZW5nYWdlZCcsICdraW5kJzogJ21pbmltYWwnfV0pCiAgICAgICBBUyAiRnJvbSB0aGUgZGlzY291bnQgdG8gcmVuZXdhbDogYWRqdXN0IGZvciBlbmdhZ2VtZW50IgpGUk9NIGN6X3RpbGVfbm9kZXMgbjsK">Edit it in the builder ↗</a>
+
+</div>
+</div>
+
+<div class="gal-tile">
+
+<div class="gal-text">
+
+### Did a learner find it
+
+`reference :=` compares a learned network with the true or expert one: matching arcs grey, a reversed one in the accent colour, an extra one amber, a missed one dashed red; the legend counts them and ends with the structural Hamming distance. Drive `threshold :=` with a slider.
+
+```sql
+SELECT 'bayes-net'::REQUIRES;
+SELECT 12::COL;
+SELECT anofox_plot_bayes_net(n,
+         arcs := [{'from': 'size', 'to': 'engaged', 'strength': 0.97}, {'from': 'engaged', 'to': 'discount', 'strength': 0.94},
+                  {'from': 'stay', 'to': 'usage', 'strength': 0.66}, {'from': 'price', 'to': 'usage', 'strength': 0.55},
+                  {'from': 'discount', 'to': 'stay', 'strength': 0.31}],
+         reference := [{'from': 'size', 'to': 'engaged'}, {'from': 'engaged', 'to': 'discount'},
+                       {'from': 'usage', 'to': 'stay'}, {'from': 'discount', 'to': 'stay'}],
+         threshold := 0.5)
+       AS "Learned against the true network"
+FROM (VALUES ('size', 'Large account'), ('engaged', 'Engaged'), ('discount', 'Got the discount'),
+             ('price', 'Price rose'), ('usage', 'Uses it weekly'), ('stay', 'Renewed')) n(id, label);
+```
+
+<a class="gal-edit" href="../../app/?mode=edit#sql=Q1JFQVRFIFRBQkxFIGdlbyBBUyBTRUxFQ1QgKiBGUk9NIChWQUxVRVMKICAoJ0VVJywnR2VybWFueScsJ0JlcmxpbicpLCgnRVUnLCdHZXJtYW55JywnTXVuaWNoJyksKCdFVScsJ0ZyYW5jZScsJ1BhcmlzJyksKCdFVScsJ0ZyYW5jZScsJ0x5b24nKSwKICAoJ0FtZXJpY2FzJywnVVNBJywnTmV3IFlvcmsnKSwoJ0FtZXJpY2FzJywnVVNBJywnQ2hpY2FnbycpLCgnQW1lcmljYXMnLCdDYW5hZGEnLCdUb3JvbnRvJyksCiAgKCdBUEFDJywnSmFwYW4nLCdUb2t5bycpLCgnQVBBQycsJ0phcGFuJywnT3Nha2EnKSwoJ0FQQUMnLCdBdXN0cmFsaWEnLCdTeWRuZXknKSkgdChyZWdpb24sIGNvdW50cnksIGNpdHkpOwpDUkVBVEUgVEFCTEUgb3JkZXJzIEFTClNFTEVDVCBEQVRFICcyMDI2LTAxLTA1JyArICg3ICogdyk6OklOVCBBUyB3ZWVrLCBnLnJlZ2lvbiwgZy5jb3VudHJ5LCBnLmNpdHksIGMuY2hhbm5lbCwKICAgICAgIChhYnMoaGFzaChnLmNpdHkgfHwgYy5jaGFubmVsIHx8IHcpKSAlIDYwICsgMjAgKyAyICogdykgQVMgcmV2ZW51ZQpGUk9NIGdlbyBnLCAoVkFMVUVTICgnd2ViJyksICgnYXBwJyksICgnc3RvcmUnKSkgYyhjaGFubmVsKSwgcmFuZ2UoMjYpIHIodyk7ClNFTEVDVCAyOjpDT0xVTU5TOwoKU0VMRUNUICdiYXllcy1uZXQnOjpSRVFVSVJFUzsKU0VMRUNUIDEyOjpDT0w7ClNFTEVDVCBhbm9mb3hfcGxvdF9iYXllc19uZXQobiwKICAgICAgICAgYXJjcyA6PSBbeydmcm9tJzogJ3NpemUnLCAndG8nOiAnZW5nYWdlZCcsICdzdHJlbmd0aCc6IDAuOTd9LCB7J2Zyb20nOiAnZW5nYWdlZCcsICd0byc6ICdkaXNjb3VudCcsICdzdHJlbmd0aCc6IDAuOTR9LAogICAgICAgICAgICAgICAgICB7J2Zyb20nOiAnc3RheScsICd0byc6ICd1c2FnZScsICdzdHJlbmd0aCc6IDAuNjZ9LCB7J2Zyb20nOiAncHJpY2UnLCAndG8nOiAndXNhZ2UnLCAnc3RyZW5ndGgnOiAwLjU1fSwKICAgICAgICAgICAgICAgICAgeydmcm9tJzogJ2Rpc2NvdW50JywgJ3RvJzogJ3N0YXknLCAnc3RyZW5ndGgnOiAwLjMxfV0sCiAgICAgICAgIHJlZmVyZW5jZSA6PSBbeydmcm9tJzogJ3NpemUnLCAndG8nOiAnZW5nYWdlZCd9LCB7J2Zyb20nOiAnZW5nYWdlZCcsICd0byc6ICdkaXNjb3VudCd9LAogICAgICAgICAgICAgICAgICAgICAgIHsnZnJvbSc6ICd1c2FnZScsICd0byc6ICdzdGF5J30sIHsnZnJvbSc6ICdkaXNjb3VudCcsICd0byc6ICdzdGF5J31dLAogICAgICAgICB0aHJlc2hvbGQgOj0gMC41KQogICAgICAgQVMgIkxlYXJuZWQgYWdhaW5zdCB0aGUgdHJ1ZSBuZXR3b3JrIgpGUk9NIChWQUxVRVMgKCdzaXplJywgJ0xhcmdlIGFjY291bnQnKSwgKCdlbmdhZ2VkJywgJ0VuZ2FnZWQnKSwgKCdkaXNjb3VudCcsICdHb3QgdGhlIGRpc2NvdW50JyksCiAgICAgICAgICAgICAoJ3ByaWNlJywgJ1ByaWNlIHJvc2UnKSwgKCd1c2FnZScsICdVc2VzIGl0IHdlZWtseScpLCAoJ3N0YXknLCAnUmVuZXdlZCcpKSBuKGlkLCBsYWJlbCk7Cg==">Edit it in the builder ↗</a>
 
 </div>
 </div>

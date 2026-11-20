@@ -59,7 +59,7 @@ const MAX_PATHS: usize = 500;
 /// The evidence modes.
 const MODES: &[&str] = &["observe", "do"];
 
-fn text(v: &J) -> Option<String> {
+pub(crate) fn text(v: &J) -> Option<String> {
     match v {
         J::Null => None,
         J::String(s) => Some(s.clone()),
@@ -70,7 +70,7 @@ fn text(v: &J) -> Option<String> {
 }
 
 /// The value of one of `names` in `row` (case ignored).
-fn field<'a>(row: &'a Row, names: &[&str]) -> Option<&'a J> {
+pub(crate) fn field<'a>(row: &'a Row, names: &[&str]) -> Option<&'a J> {
     names.iter().find_map(|n| {
         row.iter()
             .find(|(k, _)| k.eq_ignore_ascii_case(n))
@@ -79,14 +79,14 @@ fn field<'a>(row: &'a Row, names: &[&str]) -> Option<&'a J> {
     })
 }
 
-fn get(row: &Row, names: &[&str]) -> Option<String> {
+pub(crate) fn get(row: &Row, names: &[&str]) -> Option<String> {
     field(row, names)
         .and_then(text)
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
 }
 
-fn num(row: &Row, names: &[&str]) -> Option<f64> {
+pub(crate) fn num(row: &Row, names: &[&str]) -> Option<f64> {
     match field(row, names)? {
         J::Number(n) => n.as_f64(),
         J::String(s) => s.trim().parse().ok(),
@@ -97,7 +97,7 @@ fn num(row: &Row, names: &[&str]) -> Option<f64> {
 
 /// A LIST cell (`states`, `parent_states`): a JSON list, its text, or
 /// DuckDB's list text `[a, b]`.
-fn names(row: &Row, key: &[&str]) -> Vec<String> {
+pub(crate) fn names(row: &Row, key: &[&str]) -> Vec<String> {
     let items = |a: &[J]| a.iter().filter_map(text).collect::<Vec<_>>();
     match field(row, key) {
         Some(J::Array(a)) => items(a),
@@ -117,7 +117,7 @@ fn names(row: &Row, key: &[&str]) -> Vec<String> {
 }
 
 /// A list-of-structs option (`arcs :=`, `beliefs :=`, …) as rows.
-fn list(options: &Row, name: &str) -> Result<Vec<Row>, String> {
+pub(crate) fn list(options: &Row, name: &str) -> Result<Vec<Row>, String> {
     let v = match options.get(name) {
         None | Some(J::Null) => return Ok(Vec::new()),
         Some(J::String(s)) => serde_json::from_str::<J>(s)
@@ -489,7 +489,7 @@ pub(crate) fn root_attrs(options: &Row) -> Result<Vec<(String, String)>, String>
 }
 
 /// A number as hover text: at most 3 decimals.
-fn short(v: f64) -> String {
+pub(crate) fn short(v: f64) -> String {
     format!("{}", (v * 1000.0).round() / 1000.0)
 }
 
@@ -523,6 +523,8 @@ pub(crate) fn columns(rows: &[Row], options: &Row) -> Result<Vec<OutColumn>, Str
     let (mut tiers, mut groups) = (vec![], vec![]);
     // #1279: a utility node's expected value, in its diamond
     let mut utilities: Vec<J> = Vec::new();
+    // #1278: a node's swimlane (the twin network's worlds side by side)
+    let mut lanes = vec![];
     let mut tier_names: Vec<String> = Vec::new();
     for (id, row) in &net.nodes {
         let kind = net.kind(id);
@@ -554,6 +556,7 @@ pub(crate) fn columns(rows: &[Row], options: &Row) -> Result<Vec<OutColumn>, Str
                 .flatten()
                 .map_or(J::Null, |v| json!(v)),
         );
+        lanes.push(get(row, &["lane"]).map_or(J::Null, J::String));
         let states = net.states(id);
         if kind == "utility" || states.is_empty() {
             cards.push(J::Null);
@@ -751,6 +754,8 @@ pub(crate) fn columns(rows: &[Row], options: &Row) -> Result<Vec<OutColumn>, Str
     }
     if utilities.iter().any(|u| !u.is_null()) {
         cols.push(col("expected utility", "METRIC", utilities));
+    if lanes.iter().any(|l| !l.is_null()) {
+        cols.push(col("lane", "LANE", lanes));
     }
     if !arcs.is_empty() {
         cols.push(col(

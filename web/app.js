@@ -1109,6 +1109,7 @@ const FILE_SAMPLES = [
   "examples/statistics-ab-test.sql",
   "examples/statistics-churn-drivers.sql",
   "examples/bayes-auto-eda.sql",
+  "examples/bayes-causal.sql",
   "examples/decide-leads.sql",
   "examples/statistics-showcase.sql",
   "examples/forecast-callcentre-staffing.sql",
@@ -22277,6 +22278,13 @@ function bnCard(el) {
   const kinds = { chance: "Chance node", observed: "Observed node", latent: "Latent node", decision: "Decision", deterministic: "Deterministic node", utility: "Utility" };
   const ev = bn.evidence || null;
   let kicker = kinds[bn.kind] || "Node";
+  // #1278: its part in a causal view (treatment, outcome, adjustment set,
+  // front-door mediator; a twin network's world)
+  const parts = { treatment: "Treatment (X)", outcome: "Outcome (Y)", adjust: "In the adjustment set", mediator: "Front-door mediator (M)" };
+  const worlds = { factual: "Factual world", counterfactual: "Counterfactual world", shared: "Shared by both worlds" };
+  if (parts[bn.causal]) kicker += " · " + parts[bn.causal];
+  if (worlds[bn.world]) kicker += " · " + worlds[bn.world];
+  const causalNote = typeof bn.note === "string" ? bn.note : "";
   let evText = "";
   if (ev && ev.mode === "do" && ev.state != null) evText = `Set to ${ev.state} (an intervention): its causes no longer explain it.`;
   else if (ev && ev.state != null) evText = bn.kind === "decision" ? `Decided: ${ev.state}.` : `Observed: ${ev.state}.`;
@@ -22350,6 +22358,7 @@ function bnCard(el) {
     head: `<div class="tip-kicker">${escapeHtml(kicker)}</div><div class="tip-card-title">${escapeHtml(el.getAttribute("data-xtext") || id)}</div>`,
     body:
       (evText ? `<p class="tip-note tip-bn-ev">${escapeHtml(evText)}</p>` : "") +
+      (causalNote ? `<p class="tip-note tip-bn-causal">${escapeHtml(causalNote)}</p>` : "") +
       (paths ? `<p class="tip-note tip-bn-paths">${escapeHtml(paths)}</p>` : "") +
       (policy || beliefs) +
       table +
