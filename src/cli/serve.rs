@@ -1632,7 +1632,7 @@ fn check_setup(dashboards: &mut [Dashboard]) {
                     d.setup_ok.insert(i);
                 }
                 Err(e) => eprintln!(
-                    "  dashboard '{}': setup statement {} is skipped (only SET VARIABLE and CREATE TEMP VIEW/TABLE … AS <query> run here; do the rest in --init): {e}",
+                    "  dashboard '{}': setup statement {} is skipped (only SET VARIABLE, CREATE TEMP VIEW/TABLE … AS <query> and CREATE TEMP MACRO run here; do the rest in --init): {e}",
                     d.id,
                     i + 1
                 ),

@@ -15826,8 +15826,23 @@ mod tests {
             "CREATE TEMP TABLE copy_of AS SELECT 1",
             "CREATE OR REPLACE TEMPORARY VIEW v AS FROM t",
             "create temp table if not exists \"x y\" AS SELECT 1",
+            // #1249: a TEMP macro, scalar or table
+            "CREATE OR REPLACE TEMP MACRO twice(x, k := 2) AS k * x",
+            "CREATE TEMP MACRO pairs(n) AS TABLE SELECT * FROM range(n)",
         ] {
             assert!(ok(sql, true).is_ok(), "{sql}");
+        }
+        // #1249: never one that shadows a function, or smuggles a statement
+        for sql in [
+            "CREATE TEMP MACRO getvariable(x) AS 'admin'".to_string(),
+            "CREATE TEMP MACRO upper(x) AS x".to_string(),
+            "CREATE TEMP MACRO __anofox_x() AS 1".to_string(),
+            "CREATE TEMP MACRO m(x) AS x; COPY (SELECT 1) TO '/srv/data/x.csv'".to_string(),
+            "CREATE TEMP MACRO m() AS TABLE COPY (SELECT 1) TO '/srv/data/x.csv'".to_string(),
+            "CREATE TEMP MACRO m(a := (SELECT 1)) AS a".to_string(),
+            "CREATE MACRO m(x) AS x".to_string(),
+        ] {
+            assert!(ok(&sql, true).is_err(), "{sql}");
         }
         // #85: every way of running a write (or any other statement) fails,
         // as a panel and as a setup statement.

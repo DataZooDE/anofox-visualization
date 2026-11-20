@@ -1051,6 +1051,13 @@ enum Setup<'a> {
         name: String,
         expr: &'a str,
     },
+    /// `CREATE [OR REPLACE] TEMP MACRO <name>(<params>) AS <expr>`, or
+    /// `… AS TABLE <query>` (#1249): only where no access policy runs.
+    Macro {
+        name: String,
+        body: &'a str,
+        table: bool,
+    },
 }
 
 fn ident_text(src: &str, t: &lex::Token) -> Option<String> {
@@ -1080,7 +1087,7 @@ fn classify(sql: &str) -> Result<Setup<'_>, String> {
     let word = |i: usize, kw: &str| toks.get(i).is_some_and(|t| t.is_word(sql, kw));
     let refuse = || {
         format!(
-            "{} statements are not allowed (only queries, CREATE TEMP TABLE/VIEW … AS <query> and SET VARIABLE)",
+            "{} statements are not allowed (only queries, CREATE TEMP TABLE/VIEW … AS <query>, CREATE TEMP MACRO and SET VARIABLE)",
             lex::first_keyword(sql).unwrap_or_else(|| "this".into())
         )
     };
@@ -1104,9 +1111,14 @@ fn classify(sql: &str) -> Result<Setup<'_>, String> {
             i += 2;
         }
         if !(word(i, "TEMP") || word(i, "TEMPORARY")) {
-            return Err("only TEMP tables and views can be created".into());
+            return Err("only TEMP tables, views and macros can be created".into());
         }
         i += 1;
+        if word(i, "MACRO") || word(i, "FUNCTION") {
+            return classify_macro(sql, &toks, i + 1).ok_or_else(|| {
+                "CREATE TEMP MACRO: only the form `<name>(<params>) AS <expr>` or `… AS TABLE <query>` is allowed".into()
+            });
+        }
         let kind = if word(i, "TABLE") {
             "TABLE"
         } else if word(i, "VIEW") {
@@ -1140,6 +1152,102 @@ fn classify(sql: &str) -> Result<Setup<'_>, String> {
     Err(refuse())
 }
 
+/// `CREATE TEMP MACRO` after its `MACRO` keyword (token `i`): one name,
+/// one parameter list, `AS`, then an expression or `TABLE <query>` — one
+/// overload only (DuckDB's `name(a) AS …, (a, b) AS …` form is refused).
+fn classify_macro<'a>(sql: &'a str, toks: &[lex::Token], i: usize) -> Option<Setup<'a>> {
+    let name = ident_text(sql, toks.get(i)?)?;
+    if !toks.get(i + 1)?.is_punct(sql, '(') {
+        return None;
+    }
+    // the parameters: up to the matching ')'
+    let mut depth = 0usize;
+    let mut j = i + 1;
+    loop {
+        let t = toks.get(j)?;
+        if t.is_punct(sql, '(') {
+            depth += 1;
+        } else if t.is_punct(sql, ')') {
+            depth -= 1;
+            if depth == 0 {
+                break;
+            }
+        }
+        j += 1;
+    }
+    if !params_ok(sql, &toks[i + 2..j]) || !toks.get(j + 1)?.is_word(sql, "AS") {
+        return None;
+    }
+    let table = toks.get(j + 2)?.is_word(sql, "TABLE");
+    let start = if table {
+        toks[j + 2].end
+    } else {
+        toks[j + 1].end
+    };
+    let body = &sql[start..];
+    // a second overload follows a top-level ','
+    if !table && lex::split_top_commas(body).len() > 1 {
+        return None;
+    }
+    Some(Setup::Macro { name, body, table })
+}
+
+/// A TEMP macro's parameters (the tokens between its parentheses): plain
+/// names, each with at most a literal default (`n := 3`, `s := 'x'`,
+/// `d := NULL`) — a default is never checked as a query, so it may not be
+/// an expression.
+fn params_ok(sql: &str, toks: &[lex::Token]) -> bool {
+    toks.is_empty()
+        || toks.split(|t| t.is_punct(sql, ',')).all(|g| match g {
+            [name] => ident_text(sql, name).is_some(),
+            [name, op @ .., lit] if !op.is_empty() => {
+                let op: String = op.iter().map(|t| t.text(sql)).collect();
+                let literal = matches!(lit.kind, TokKind::Number | TokKind::String)
+                    || ["NULL", "TRUE", "FALSE"]
+                        .iter()
+                        .any(|k| lit.is_word(sql, k));
+                ident_text(sql, name).is_some()
+                    && literal
+                    && (op == ":=" || (op == ":=-" && lit.kind == TokKind::Number))
+            }
+            _ => false,
+        })
+}
+
+/// The name a dashboard's `CREATE TEMP MACRO` statement defines, if `sql`
+/// is one (#1249): a server must refuse one that shadows a function.
+pub fn created_macro(sql: &str) -> Option<String> {
+    match classify(sql.trim().trim_end_matches(';')) {
+        Ok(Setup::Macro { name, .. }) => Some(name),
+        _ => None,
+    }
+}
+
+/// May a dashboard's `CREATE TEMP MACRO` use `name` (#1249)? A TEMP macro
+/// comes first in DuckDB's lookup, so one named like a function shadows it
+/// for every later statement of the session — `getvariable` would answer
+/// for the server's own claim checks. Refused: any name a function already
+/// has (`duck`'s catalog), and the server's own prefixes.
+pub fn check_macro_name(duck: &mut dyn Duck, name: &str) -> Result<(), String> {
+    let lower = name.to_ascii_lowercase();
+    if lower.starts_with("__") || lower.starts_with("anofox") {
+        return Err(format!("CREATE TEMP MACRO {name}: a reserved name"));
+    }
+    let n = first_value(
+        duck,
+        &format!(
+            "SELECT count(*)::VARCHAR FROM duckdb_functions() WHERE lower(function_name) = {}",
+            sql_string_literal(&lower)
+        ),
+    )?;
+    if n != "0" {
+        return Err(format!(
+            "CREATE TEMP MACRO {name}: a function of that name exists, and the macro would replace it"
+        ));
+    }
+    Ok(())
+}
+
 /// The query DuckDB must accept for dashboard statement `sql`: the statement
 /// itself, the query of `CREATE TEMP … AS <query>`, or `SELECT <expr>` for
 /// `SET VARIABLE`. Any other statement is an error.
@@ -1149,6 +1257,14 @@ pub fn statement_query(sql: &str) -> Result<String, String> {
         Setup::Query => sql.to_string(),
         Setup::Create { body, .. } => body.to_string(),
         Setup::SetVariable { expr, .. } => format!("SELECT {expr}"),
+        // a body with its parameters as plain names: parsed, never bound
+        Setup::Macro { body, table, .. } => {
+            if table {
+                body.to_string()
+            } else {
+                format!("SELECT {body}")
+            }
+        }
     })
 }
 
@@ -1231,6 +1347,12 @@ pub fn check_panels(
                     return Err((i, format!("variable '{name}' is set by the server")));
                 }
                 format!("SELECT {expr}")
+            }
+            Setup::Macro { name, .. } => {
+                return Err((
+                    i,
+                    format!("CREATE TEMP MACRO {name}: an agent's dashboard can't define macros"),
+                ));
             }
         };
         let mut ast = serialize(duck, &query).map_err(|e| (i, e))?;
@@ -1470,6 +1592,10 @@ impl Enforcer {
                             self.rewrite_query(duck, &format!("SELECT {expr}"), &temps)?;
                         Ok((format!("SET VARIABLE {name} = ({q})"), used, cols))
                     }
+                    // a body would run outside the per-request views
+                    Setup::Macro { name, .. } => Err(format!(
+                        "CREATE TEMP MACRO {name} is not allowed under an access policy: define it in the init script (a scalar macro whose body reads no table can be called there)"
+                    )),
                 }
             })
             .collect()
@@ -1825,10 +1951,50 @@ mod tests {
             }
             _ => panic!(),
         }
+        // #1249: a TEMP macro, scalar or table
+        match classify("CREATE OR REPLACE TEMP MACRO twice(x, y := 2) AS x * y") {
+            Ok(Setup::Macro { name, body, table }) => {
+                assert_eq!(name, "twice");
+                assert_eq!(body.trim(), "x * y");
+                assert!(!table);
+            }
+            _ => panic!(),
+        }
+        match classify("create temporary macro \"P\"(n) as table select * from range(n)") {
+            Ok(Setup::Macro { name, body, table }) => {
+                assert_eq!(name, "P");
+                assert_eq!(body.trim(), "select * from range(n)");
+                assert!(table);
+            }
+            _ => panic!(),
+        }
+        assert_eq!(
+            statement_query("CREATE TEMP MACRO twice(x) AS 2 * x;").unwrap(),
+            "SELECT  2 * x"
+        );
+        assert_eq!(
+            created_macro("CREATE TEMP MACRO m() AS 1").as_deref(),
+            Some("m")
+        );
+        for ok in [
+            "CREATE TEMP MACRO m(a, b := 2, c := 'x', d := NULL, e := -1.5) AS a",
+            "CREATE TEMP MACRO m(\"A b\") AS 1",
+        ] {
+            assert!(matches!(classify(ok), Ok(Setup::Macro { .. })), "{ok}");
+        }
+        assert_eq!(created_macro("CREATE TEMP VIEW v AS SELECT 1"), None);
         for bad in [
             "CREATE TABLE t AS SELECT 1",
             "CREATE TEMP TABLE t (a INT)",
-            "CREATE TEMP MACRO m() AS (SELECT 1)",
+            "CREATE MACRO m() AS 1",
+            "CREATE TEMP MACRO main.m() AS 1",
+            "CREATE TEMP MACRO m AS 1",
+            "CREATE TEMP MACRO m(a) AS a, (a, b) AS a + b",
+            "CREATE TEMP MACRO m(a) 1",
+            "CREATE TEMP MACRO m(a := (SELECT 1)) AS a",
+            "CREATE TEMP MACRO m(a := current_setting('threads')) AS a",
+            "CREATE TEMP MACRO m(a,) AS a",
+            "CREATE TEMP MACRO m(a INTEGER) AS a",
             "CREATE TEMP TABLE main.t AS SELECT 1",
             "INSERT INTO t SELECT 1",
             "PIVOT sales ON region USING sum(x)",

@@ -5214,7 +5214,7 @@ run by renaming a new file into place (`mv`), which is always read fresh; a
 file overwritten in place at the same size within the same second, or with
 its mtime restored, can be read with its old footer until a refresh. With
 `data` set, every statement must be a query (or `SET VARIABLE` / `CREATE
-TEMP TABLE|VIEW … AS <query>`); mount the folder read-only for a hard
+TEMP TABLE|VIEW … AS <query>` / `CREATE TEMP MACRO`); mount the folder read-only for a hard
 guarantee
 ([`secure-serving.md`](secure-serving.md)).
 

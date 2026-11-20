@@ -351,10 +351,13 @@ FROM read_parquet(getvariable('anofox_data') || '/' || getvariable('run') || '/f
   `SELECT` statements): panels must be queries (`SELECT`, `WITH`, `FROM`,
   `VALUES`, set operations; a `PIVOT` only as a subquery with its `IN (…)`
   values listed), and setup statements must be queries, `SET VARIABLE <name> =
-  <expression>` or `CREATE [OR REPLACE] TEMP TABLE|VIEW <name> AS <query>`
-  with a query that passes the same check (the same classifier the
+  <expression>`, `CREATE [OR REPLACE] TEMP TABLE|VIEW <name> AS <query>` or
+  `CREATE [OR REPLACE] TEMP MACRO <name>(<params>) AS <expression>` / `… AS
+  TABLE <query>` (#1249; one overload, and its name may not be a function's
+  already: a TEMP macro would replace it, `getvariable` included) with a
+  query that passes the same check (the same classifier the
   [access policy](#row-and-column-policies-access-control-p2) uses). Everything else — `EXPLAIN`,
-  `PREPARE`, `EXECUTE`, `CALL`, `PRAGMA`, `COPY`, `INSERT`, macros, … — fails
+  `PREPARE`, `EXECUTE`, `CALL`, `PRAGMA`, `COPY`, `INSERT`, a non-TEMP macro, … — fails
   the start. The check needs DuckDB's `json` extension (loaded into the
   snapshot automatically; without it the server refuses to start).
 - **`-- @requires` paths** ([DOCS](DOCS.md), *Not available*) are checked
@@ -2194,8 +2197,9 @@ Consumers pick a dashboard id and whitelisted params
   that doesn't exist is refused at startup.
 - A dashboard's own setup statements run in every page's read-only session,
   after the locks above (a TEMP VIEW lives in one session, #680) — only
-  `SET VARIABLE` and `CREATE [OR REPLACE] TEMP VIEW|TABLE … AS <query>`, the
-  locked server's data-folder rule, checked with DuckDB's parser at startup.
+  `SET VARIABLE`, `CREATE [OR REPLACE] TEMP VIEW|TABLE … AS <query>` and
+  `CREATE [OR REPLACE] TEMP MACRO` (#1249), the locked server's data-folder
+  rule, checked with DuckDB's parser at startup.
   Any other setup statement (and one setting a `__claim_*` or `anofox_data`
   variable) is skipped with a startup warning: do it in `--init`. The
   credential's locked variables and claims are set again after each one.
@@ -3362,7 +3366,9 @@ start (the error names the dashboard and statement), when it:
   `SUMMARIZE` of a table without a rule;
 - is not a query, `CREATE [OR REPLACE] TEMP TABLE|VIEW <name> AS <query>` or
   `SET VARIABLE <name> = <expr>` (whose query / expression is rewritten too):
-  `CREATE MACRO`, `ATTACH`, `COPY`, `SET`, `PIVOT …` statements (use `FROM t
+  `CREATE MACRO` (a TEMP one too: its body would run outside the per-request
+  views — a scalar macro whose body reads no table can be defined in the init
+  script instead), `ATTACH`, `COPY`, `SET`, `PIVOT …` statements (use `FROM t
   PIVOT (…)`), … are refused, as is a setup statement that sets a `__claim_*`
   variable or creates an object named `__anofox…`.
 
