@@ -1846,7 +1846,9 @@ pub fn too_broad(dir: &Path) -> Option<String> {
 /// `Ok` if `sql` (a panel, or a setup statement if `setup`) may run with a
 /// data folder open: a panel must be one query; a setup statement may also
 /// be `SET VARIABLE <name> = <expr>` or `CREATE [OR REPLACE] TEMP TABLE|VIEW
-/// <name> AS <query>`, whose expression / query must parse as one query —
+/// <name> AS <query>` or `CREATE [OR REPLACE] TEMP MACRO <name>(…) AS <expr |
+/// TABLE query>` (#1249; its name may not shadow a function), whose
+/// expression / query must parse as one query —
 /// classified by DuckDB's own parser ([`crate::host::policy::statement_query`],
 /// [`crate::host::policy::check_query`]), the same way the access policy is.
 pub fn read_only_statement(
@@ -1855,6 +1857,9 @@ pub fn read_only_statement(
     duck: &mut dyn crate::host::policy::Duck,
 ) -> Result<(), String> {
     let query = if setup {
+        if let Some(name) = crate::host::policy::created_macro(sql) {
+            crate::host::policy::check_macro_name(duck, &name)?;
+        }
         crate::host::policy::statement_query(sql).map_err(|e| format!("with a data folder: {e}"))?
     } else {
         sql.to_string()

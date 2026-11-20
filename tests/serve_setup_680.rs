@@ -159,3 +159,85 @@ fn a_missing_named_db_refuses_to_start() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("no such database"), "{stderr}");
 }
+
+/// #1249: a dashboard's own `CREATE TEMP MACRO` (scalar or table) runs before
+/// its panels, also as a table function's argument; one that would shadow a
+/// function (`getvariable`, which the claim checks read) is skipped.
+#[test]
+fn setup_temp_macros_reach_the_panels() {
+    if !have_duckdb("setup_temp_macros_reach_the_panels") {
+        return;
+    }
+    let s = Scratch::new("macro");
+    let dash = s.0.join("dash");
+    std::fs::create_dir_all(&dash).unwrap();
+    std::fs::write(
+        dash.join("m.sql"),
+        "-- @title M\n\
+         CREATE OR REPLACE TEMP MACRO twice(x) AS 2 * x;\n\
+         CREATE OR REPLACE TEMP MACRO pairs(n) AS TABLE SELECT i AS x FROM range(1, n + 1) t(i);\n\
+         CREATE OR REPLACE TEMP MACRO lo() AS 1249;\n\
+         SELECT twice(621)::METRIC, 'twice'::LABEL;\n\
+         SELECT sum(x)::BIGINT::METRIC, 'pairs'::LABEL FROM pairs(3);\n\
+         SELECT max(range)::METRIC, 'arg'::LABEL FROM range(lo(), lo() + 1);\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dash.join("s.sql"),
+        "-- @title S\nCREATE TEMP MACRO getvariable(x) AS 'mallory';\n\
+         SELECT coalesce(getvariable('__claim_user'), 'nobody') AS who ::TABLE;\n",
+    )
+    .unwrap();
+    // nor a macro only the served database has (a view of it reads it)
+    let db = s.0.join("own.duckdb");
+    let made = Command::new("duckdb")
+        .arg(&db)
+        .arg("-c")
+        .arg("CREATE MACRO my_region() AS 'eu'; CREATE VIEW mine AS SELECT my_region() AS r;")
+        .output()
+        .unwrap();
+    assert!(made.status.success(), "{made:?}");
+    std::fs::write(
+        dash.join("r.sql"),
+        "-- @title R\nCREATE TEMP MACRO my_region() AS 'us';\nSELECT r AS region ::TABLE FROM mine;\n",
+    )
+    .unwrap();
+    let port = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let server = Kill(Some(
+        Command::new(env!("CARGO_BIN_EXE_serve"))
+            .arg("--dashboards")
+            .arg(&dash)
+            .arg("--db")
+            .arg(&db)
+            .args(["--port", &port.to_string(), "--no-open"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap(),
+    ));
+    let m = http_get(port, "/d/m");
+    assert!(m.starts_with("HTTP/1.1 200"), "{m}");
+    for v in [">1,242<", ">6<", ">1,249<"] {
+        assert!(m.contains(v) || m.contains(&v.replace(',', "")), "{v}: {m}");
+    }
+    let sh = http_get(port, "/d/s");
+    assert!(!sh.contains("mallory"), "{sh}");
+    let r = http_get(port, "/d/r");
+    assert!(r.contains(">eu<") && !r.contains(">us<"), "{r}");
+    let out = server.finish();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("dashboard 's': setup statement 1 is skipped")
+            && stderr.contains("the macro would replace it"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("dashboard 'r': setup statement 1 is skipped"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("dashboard 'm'"), "{stderr}");
+}
