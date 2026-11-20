@@ -192,13 +192,14 @@ crate-type = ["cdylib", "rlib"]
 # 0.61.0 (sipemu/ggplot-rs#526, #1277): hclust — a heatmap's clustering order.
 # 0.62.0 (sipemu/ggplot-rs#530, #1276): a Bayesian network's evidence — state changes, a moved tint, cut arcs, a hand for do().
 # 0.63.0 (sipemu/ggplot-rs#532, #1279): a table in a node's box — an influence diagram's policy.
+# 0.64.0 (sipemu/ggplot-rs#534, #1278): causal marks — a ring, a letter badge, a blocked edge.
 # 0.49.0 (sipemu/ggplot-rs#506, #1166): glyph factors; bus edges labelled by tooltip.
 # 0.48.1 (sipemu/ggplot-rs#505): a factor graph's parameter edges run as a bus.
 # 0.48.0 (sipemu/ggplot-rs#493–#497): stacks follow the fill levels; an
 # unmapped column named like an aesthetic changes nothing; factor-graph shapes
 # and the banded layout (#1151).
 # For local ggplot-rs work, `[patch.crates-io]` it to a path.
-ggplot-rs = { version = "0.63.0", default-features = false, features = ["sf", "tiles"] }
+ggplot-rs = { version = "0.64.0", default-features = false, features = ["sf", "tiles"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 # The drawing-only SVG check (src/svg_safe.rs): `--site`'s assets and runtime
 # plugins' panels, natively and in the browser build (#1213).
