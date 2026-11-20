@@ -2849,7 +2849,7 @@ async function boot() {
   const sideVer = document.getElementById("side-ver");
   if (sideVer) sideVer.textContent = wasmVersion(); // "v2026.10.18" or "v2026.10.18+37 · 739aba4" (#216)
   // #1213: runtime plugins (plugins.json) before the roles are read
-  await loadPlugins(register_plugin);
+  await loadPlugins(register_plugin, "plugins.json", pageSession());
   loadRoleSets();
   loadModuleAssets();
 
@@ -7682,7 +7682,12 @@ function loadModuleAssets() {
   } catch (_) {
     return;
   }
-  loadAssetFiles(paths);
+  loadAssetFiles(paths, pageSession());
+}
+// An embedded or shared page's session header, else none: module and plugin
+// files need a credential (#1284), and such a page has no cookie.
+function pageSession() {
+  return window.__served && window.__served.session ? { "X-Anofox-Session": window.__served.session } : {};
 }
 function loadRoleSets() {
   try {

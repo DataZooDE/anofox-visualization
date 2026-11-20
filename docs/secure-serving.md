@@ -3016,6 +3016,14 @@ curl -X POST https://dash.example.com/api/auth/token -H "Authorization: Bearer $
   `makeAnofoxDashboard(React)`, props `src`, `getToken`, `vars`,
   `onState`, `onLink`) answer without a login and with CORS
   (`Access-Control-Allow-Origin: *`): they are code, with no data.
+- With `embed` or `share` on, the app's own code (`.js`, `.css`, `.wasm`,
+  fonts) answers without a login, so an embedded or shared page can load
+  it. **A loaded plugin is not part of that** (#1284): `/plugins.json` and
+  `/modules/<name>/…` (the plugin's `.wasm` and its browser files) need a
+  credential like a page — a signed-in viewer's, or the embedded or shared
+  page's own session, which the page sends with each plugin request. Who
+  can open a dashboard that uses a plugin can download that plugin; nobody
+  else can.
 - Every token minted, or refused, is in the audit log (`"audit": "embed_token"`).
 
 ### API keys (`"mode": "api_keys"`)

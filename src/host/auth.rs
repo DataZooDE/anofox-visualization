@@ -684,13 +684,23 @@ impl Auth {
 
     /// A static file of the viewer UI (code, styles, fonts — never data) that
     /// an embedded or shared page loads without its page session: with
-    /// `embed` or `share` configured, these are public. They hold nothing but the open-source UI.
+    /// `embed` or `share` configured, these are public. They hold nothing but the open-source UI —
+    /// a loaded plugin (`/modules/…`) is not one of them (#1284).
     pub fn public_asset(&self, method: &str, path: &str) -> bool {
         (self.embed.is_some() || self.share.is_some())
             && method == "GET"
             && !path.starts_with("/d/")
             && !path.starts_with("/api/")
             && !path.starts_with("/auth/")
+            // #1284: a loaded plugin (its .wasm and browser files) needs a
+            // credential like a page; an embed or share page loads it with
+            // its own session
+            // the file lookups trim every leading '/' (and the server takes
+            // the request target as sent): an origin-form path, exactly one
+            // '/' in front, never a plugin's (review of #1284)
+            && path.starts_with('/')
+            && !path.contains("//")
+            && !path.trim_start_matches('/').starts_with("modules/")
             && !path.contains("..")
             && [".js", ".mjs", ".css", ".wasm", ".woff2", ".woff", ".ico"]
                 .iter()

@@ -183,6 +183,8 @@ A parameter's default is a literal (`NULL`, a number, `'text'`, `true`/`false`) 
 
 `ASSETS` (`(path, bytes)`, `.js`, `.css`, `.json`, `.svg`, `.png`, `.woff2`, together at most 8 MiB) are served at `/modules/<name>/<path>` like a linked module's. **They run in the page, outside the sandbox**, so a host takes them only when the operator allows it (`plugin::register_with(…, assets: true)`); otherwise the plugin loads without them.
 
+**Who can download a plugin.** A server with a login (`--auth`, `options.auth`) serves `plugins.json` and everything under `/modules/<name>/` only with a credential, also when embed links or shared dashboards are on (#1284): a signed-in viewer, or an embedded or shared page through its own session. Such a page has no cookie a `<script src>` could send, so it fetches each browser file with its session and puts it inline (a `<style>`, or a `<script type="module">` with the page's nonce): a plugin script there resolves a relative `import` against the page, not its own folder.
+
 ### The sandbox
 
 | What | How |
