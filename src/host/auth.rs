@@ -696,6 +696,9 @@ impl Auth {
             // credential like a page; an embed or share page loads it with
             // its own session
             && !path.starts_with("/modules/")
+            // the file lookups trim every leading '/', so `//modules/…`
+            // would reach a plugin past the check above (review of #1284)
+            && !path.contains("//")
             && !path.contains("..")
             && [".js", ".mjs", ".css", ".wasm", ".woff2", ".woff", ".ico"]
                 .iter()

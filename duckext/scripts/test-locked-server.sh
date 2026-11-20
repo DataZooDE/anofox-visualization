@@ -285,8 +285,8 @@ sess=$(curl -s "http://127.0.0.1:$PORT/d/ex" | grep -o '"session":"[^"]*"' | hea
 # files are not: they need a credential, the page session will do.
 H="http://127.0.0.1:$PORT"
 [ "$(xget "$H/app.js")" = 200 ] || fail "app.js stays public with share links"
-for f in /modules/acme/plugin.wasm /modules/acme/view.js /modules/acme/view.css /plugins.json; do
-  [ "$(xget "$H$f")" = 401 ] || fail "$f without a credential should 401"
+for f in /modules/acme/plugin.wasm /modules/acme/view.js /modules/acme/view.css /plugins.json //modules/acme/plugin.wasm //modules/acme/view.js; do
+  [ "$(xget --path-as-is "$H$f")" = 401 ] || fail "$f without a credential should 401"
   [ "$(xget -H "X-Anofox-Session: $sess" "$H$f")" != 401 ] || fail "$f with the page session passes the login"
 done
 stop

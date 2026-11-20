@@ -94,7 +94,15 @@ export function loadAssetFiles(paths, headers = {}) {
   if (Object.keys(headers).length) {
     for (const p of paths) {
       if (typeof p !== "string" || !/\.(css|m?js)$/i.test(p)) continue;
-      inlineAssetFile(p, headers).catch((e) => console.warn(`${p}: ${e.message || e}`));
+      // the session goes to this site only
+      let url;
+      try {
+        url = new URL(p, document.baseURI);
+      } catch (_) {
+        continue;
+      }
+      if (url.origin !== location.origin) continue;
+      inlineAssetFile(url.href, headers).catch((e) => console.warn(`${p}: ${e.message || e}`));
     }
     return;
   }
@@ -114,8 +122,12 @@ export function loadAssetFiles(paths, headers = {}) {
   }
 }
 
+// A request carrying the page session follows no redirect (the session and
+// what is put inline stay with this site).
+const noRedirect = (headers) => (Object.keys(headers).length ? "error" : "follow");
+
 async function inlineAssetFile(p, headers) {
-  const res = await fetch(p, { credentials: "same-origin", headers });
+  const res = await fetch(p, { credentials: "same-origin", headers, redirect: "error" });
   if (!res.ok) throw new Error(`${res.status}`);
   const css = /\.css$/i.test(p);
   const el = document.createElement(css ? "style" : "script");
@@ -130,7 +142,7 @@ async function inlineAssetFile(p, headers) {
 
 // Load one plugin from `url`: its name and manifest, or throws why not.
 async function loadOne(url, register, headers) {
-  const res = await fetch(url, { credentials: "same-origin", headers });
+  const res = await fetch(url, { credentials: "same-origin", headers, redirect: noRedirect(headers) });
   if (!res.ok) throw new Error(`${res.status}`);
   const module = await WebAssembly.compile(await res.arrayBuffer());
   const imports = WebAssembly.Module.imports(module);
@@ -173,7 +185,7 @@ async function loadOne(url, register, headers) {
 export async function loadPlugins(register, listUrl = "plugins.json", headers = {}) {
   let urls = [];
   try {
-    const res = await fetch(listUrl, { credentials: "same-origin", cache: "no-cache", headers });
+    const res = await fetch(listUrl, { credentials: "same-origin", cache: "no-cache", headers, redirect: noRedirect(headers) });
     if (!res.ok) return [];
     urls = await res.json();
   } catch (_) {
