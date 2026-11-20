@@ -45,7 +45,7 @@ import init, {
   version as wasmVersion,
   AskSession,
 } from "./pkg/anofox_visualization.js";
-import { loadPlugins, loadAssetFiles } from "./plugins.js";
+import { loadPlugins, loadAssetFiles, serverRoleTokens } from "./plugins.js";
 import { animKit } from "./anim.js";
 import { keepMathCase } from "./nocase.js";
 import { addCopyButtons, wireCopyButtons } from "./copycode.js";
@@ -1705,7 +1705,7 @@ function askGoTo(i, c) {
 
 // SQL can stand in two tabs, whose `-- @requires` differ (#167); else the
 // first statement with that SQL.
-async function servedRequest(sql, page, kind, at) {
+async function servedRequest(sql, page, kind, at, size) {
   if (!servedIndex) {
     servedIndex = new Map();
     servedPlan = JSON.parse(plan(window.__served.sql));
@@ -1726,8 +1726,17 @@ async function servedRequest(sql, page, kind, at) {
     const { base, ...rest } = page;
     body.page = rest;
   }
+  // #1306: a server-only plugin's panel comes drawn (renderChart shows it)
+  const st = servedPlan[idx];
+  if (serverRoleTokens().size && st.roles.some((r) => serverRoleTokens().has(String(r[1]).toUpperCase()))) {
+    // first at the dashboard's width; renderChart asks again at the card's
+    // own size (`size`) when that differs
+    const w = size ? size.w : Math.max(320, Math.min(1600, Math.round(document.querySelector(".dash")?.clientWidth || 960)));
+    const h = size ? size.h : Math.round(w * 0.6);
+    body.draw = { width: Math.max(16, Math.min(4096, w)), height: Math.max(16, Math.min(4096, h)), ctx: renderCtx() };
+  }
   const deps = servedDepsOff ? null : servedDepsOf(window.__served, servedPlan.length, idx);
-  const ckey = JSON.stringify([idx, body.page ?? null, servedVarSig(deps, vars)]);
+  const ckey = JSON.stringify([idx, body.page ?? null, servedVarSig(deps, vars), body.draw ?? null]);
   if (servedCache.has(ckey)) {
     performance.mark("dp:served-hit");
     return servedCache.get(ckey);
@@ -13064,6 +13073,18 @@ function animateIn(panels = document.querySelectorAll(".dash .panel")) {
   }
 }
 
+// #1306: the server's picture of a panel a server-only plugin draws (the
+// first row's "__anofox_svg"), or null.
+function serverDrawn(rows) {
+  if (typeof rows !== "string" || !rows.includes('"__anofox_svg"')) return null;
+  try {
+    const r = JSON.parse(rows)[0];
+    return r && typeof r.__anofox_svg === "string" ? r.__anofox_svg : null;
+  } catch (_) {
+    return null;
+  }
+}
+
 // Render a chart's SVG into its holder — the dashboard run and every in-place
 // re-render (toolbox chart-type switch, zoom/pan) — with its entrance mode.
 // A chart with ::TRACKs (holder._tracks) renders as one stack, so the strips
@@ -13073,6 +13094,32 @@ function animateIn(panels = document.querySelectorAll(".dash .panel")) {
 // Follow with wireCharts() once the holder is in the page.
 function renderChart(holder, rows, roles, w, ph, zoom = "") {
   const t0 = performance.now();
+  // #1306: drawn by the server (a plugin the page never gets) — shown as
+  // it came, scaled to the card
+  const drawn = serverDrawn(rows);
+  if (drawn != null) {
+    holder.innerHTML = drawn;
+    const svg = holder.querySelector(":scope > svg");
+    if (svg) {
+      const vw = svg.getAttribute("width"), vh = svg.getAttribute("height");
+      if (!svg.hasAttribute("viewBox") && +vw && +vh) svg.setAttribute("viewBox", `0 0 ${+vw} ${+vh}`);
+      svg.setAttribute("width", "100%");
+      svg.removeAttribute("height");
+      svg.style.height = "auto";
+      // drawn at another size than this card's: ask once more at its own
+      if (+vw && Math.abs(+vw - w) > 24 && holder._stmt != null && servedPlan?.[holder._stmt]) {
+        const at = holder._stmt;
+        servedRequest(servedPlan[at].sql, null, null, at, { w: Math.round(w), h: Math.round(ph) })
+          .then((text) => holder.isConnected && serverDrawn(text) != null && renderChart(holder, text, roles, w, ph, zoom))
+          .catch(() => {});
+      }
+    }
+    holder._zoom = zoom;
+    markFitted(holder, ph);
+    markAnim(holder, roles);
+    performance.measure("dp:render", { start: t0 });
+    return;
+  }
   const extra = {};
   if (holder._frame != null) extra.frame = holder._frame;
   const notes = notesFor(holder._stmt);

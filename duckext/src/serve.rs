@@ -442,6 +442,34 @@ fn load_plugins(paths: &[String], assets: bool) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(feature = "plugins")]
+use anofox_visualization::plugin::server_drawn_roles;
+#[cfg(not(feature = "plugins"))]
+fn server_drawn_roles(_: &anofox_visualization::sql::Panel) -> Option<String> {
+    None
+}
+
+/// #1306: `options.plugins` entries with `"browser": false`.
+#[cfg(feature = "plugins")]
+fn load_server_plugins(paths: &[String]) -> Result<(), String> {
+    static LOADED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    let mut loaded = LOADED.lock().map_err(|_| "plugin registry poisoned")?;
+    for p in paths {
+        if loaded.contains(p) {
+            continue;
+        }
+        anofox_visualization::plugin::register_file_server_only(std::path::Path::new(p))
+            .map_err(|e| format!("options.plugins: {e}"))?;
+        loaded.push(p.clone());
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "plugins"))]
+fn load_server_plugins(paths: &[String]) -> Result<(), String> {
+    load_plugins(paths, false)
+}
+
 #[cfg(not(feature = "plugins"))]
 fn load_plugins(paths: &[String], _assets: bool) -> Result<(), String> {
     if paths.is_empty() {
@@ -1361,6 +1389,9 @@ pub struct LockedOptions {
     /// `plugin_assets`: also serve their browser files.
     pub plugins: Vec<String>,
     pub plugin_assets: bool,
+    /// `plugins` entries with `"browser": false` (#1306): loaded here, their
+    /// panels drawn here; the page never gets their files.
+    pub server_plugins: Vec<String>,
     /// `folders` (#772): serve the `*.sql` files one level down too, each
     /// folder a group of the nav and the `/` list.
     pub folders: bool,
@@ -1785,6 +1816,7 @@ impl Default for LockedOptions {
             site_css: None,
             plugins: Vec::new(),
             plugin_assets: false,
+            server_plugins: Vec::new(),
             folders: false,
             ingest: None,
             ask: None,
@@ -2082,10 +2114,29 @@ impl LockedOptions {
                     o.site_css = Some(Arc::from(css));
                 }
                 "plugins" => {
-                    o.plugins = val
-                        .as_array()
-                        .and_then(|a| a.iter().map(|v| v.as_str().map(String::from)).collect())
-                        .ok_or("options.plugins must be a list of .wasm file paths")?;
+                    // a path, or {"path": …, "browser": false} for a plugin
+                    // that stays on the server (#1306)
+                    let bad = "options.plugins must be a list of .wasm file paths (or {\"path\": …, \"browser\": false})";
+                    for v in val.as_array().ok_or(bad)? {
+                        match v {
+                            serde_json::Value::String(p) => o.plugins.push(p.clone()),
+                            serde_json::Value::Object(m) => {
+                                if m.keys().any(|k| k != "path" && k != "browser") {
+                                    return Err(bad.into());
+                                }
+                                let p = m.get("path").and_then(|p| p.as_str()).ok_or(bad)?;
+                                match m.get("browser") {
+                                    None => o.plugins.push(p.into()),
+                                    Some(serde_json::Value::Bool(true)) => o.plugins.push(p.into()),
+                                    Some(serde_json::Value::Bool(false)) => {
+                                        o.server_plugins.push(p.into())
+                                    }
+                                    Some(_) => return Err(bad.into()),
+                                }
+                            }
+                            _ => return Err(bad.into()),
+                        }
+                    }
                 }
                 "plugin_assets" => {
                     o.plugin_assets = val
@@ -2135,6 +2186,7 @@ impl LockedOptions {
             }
         }
         load_plugins(&o.plugins, o.plugin_assets)?;
+        load_server_plugins(&o.server_plugins)?;
         // A response larger than the in-flight budget could never be sent.
         o.max_response = o
             .max_response
@@ -2374,6 +2426,9 @@ struct Dash {
     sql: String,
     /// Planned statements: (is_setup, sql), indexed like the client's plan().
     stmts: Vec<(bool, String)>,
+    /// Per statement: its roles (`[[col, "ROLE", name], …]`) when a
+    /// server-only plugin draws it (#1306) — its panel is sent as SVG.
+    server_drawn: Vec<Option<String>>,
     /// Per statement: a `::PAGED` table with an `::INFO` column (the only
     /// column a page request may leave out).
     info: Vec<bool>,
@@ -7414,6 +7469,10 @@ fn plan_dash(id: String, sql: String, meta: sv::DashboardMeta, updated: Option<S
         .iter()
         .map(|p| if p.setup { Vec::new() } else { p.tabs.clone() })
         .collect();
+    let server_drawn = planned
+        .iter()
+        .map(|p| if p.setup { None } else { server_drawn_roles(p) })
+        .collect();
     // #517 S2: every input's declared variable name (static — the
     // column's own name or explicit alias, [`sql::rewrite`]'s
     // `Role::Input` case; never run to find out), and every `::SUBMIT`
@@ -7513,6 +7572,7 @@ fn plan_dash(id: String, sql: String, meta: sv::DashboardMeta, updated: Option<S
         id,
         sql,
         stmts,
+        server_drawn,
         info,
         meta,
         updated,
@@ -9160,6 +9220,11 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
                 Err((code, e)) => return reply(req, code, &e),
             };
             let supersede = req_header(&req, SUPERSEDE_HEADER).map(str::to_string);
+            // #1306: a server-only plugin's panel is drawn here
+            let (body, draw) = match split_draw(&body) {
+                Ok(x) => x,
+                Err(e) => return reply(req, 400, &e),
+            };
             // Held until the response is written.
             let mut charge = st.inflight.charge();
             match locked_panel(
@@ -9171,7 +9236,11 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
                 ident.as_ref().map(|i| i.method),
                 info,
                 &mut charge,
-            ) {
+            )
+            .and_then(|(json, etag, deps)| match &draw {
+                Some(d) => drawn_panel(st, &body, json, etag, d).map(|(j, e)| (j, e, deps)),
+                None => Ok((json, etag, deps)),
+            }) {
                 Ok((json, etag, deps)) => {
                     info.bytes = Some(json.len());
                     respond_panel(req, json, &etag, &deps);
@@ -11012,6 +11081,89 @@ fn locked_panel(
 ) -> Result<(Arc<String>, String, String), (u16, String)> {
     let r = sv::parse_panel_request(body).map_err(|e| (400, e))?;
     locked_panel_req(st, r, supersede, claims, scope, auth_method, info, charge)
+}
+
+/// `/api/panel`'s optional `"draw": {"width", "height", "ctx"}` (#1306): the
+/// size and render context the page draws a panel at. Taken out of the body
+/// before the request is parsed as usual.
+struct Draw {
+    width: u32,
+    height: u32,
+    ctx: String,
+}
+
+fn split_draw(body: &str) -> Result<(String, Option<Draw>), String> {
+    let mut v: serde_json::Value =
+        serde_json::from_str(body).map_err(|e| format!("bad request JSON: {e}"))?;
+    let Some(d) = v.as_object_mut().and_then(|o| o.remove("draw")) else {
+        return Ok((body.to_string(), None));
+    };
+    let bad = "'draw' must be {\"width\", \"height\", \"ctx\"}";
+    let o = d.as_object().ok_or(bad)?;
+    if o.keys()
+        .any(|k| !matches!(k.as_str(), "width" | "height" | "ctx"))
+    {
+        return Err(bad.into());
+    }
+    let dim = |k: &str| {
+        o.get(k)
+            .and_then(|n| n.as_u64())
+            .filter(|n| (16..=4096).contains(n))
+            .map(|n| n as u32)
+            .ok_or(bad)
+    };
+    let ctx = match o.get("ctx") {
+        None => String::new(),
+        Some(serde_json::Value::String(c)) if c.len() <= 16 * 1024 => c.clone(),
+        Some(_) => return Err(bad.into()),
+    };
+    Ok((
+        v.to_string(),
+        Some(Draw {
+            width: dim("width")?,
+            height: dim("height")?,
+            ctx,
+        }),
+    ))
+}
+
+/// A panel's answer with its picture (#1306): when a server-only plugin draws
+/// the requested statement, its rows go out as they are, the first one
+/// carrying `"__anofox_svg"` — drawn here at the page's size and context,
+/// the plugin's SVG held to the same allow-list as anywhere. Any other
+/// statement's answer is unchanged.
+fn drawn_panel(
+    st: &Locked,
+    body: &str,
+    json: Arc<String>,
+    etag: String,
+    d: &Draw,
+) -> Result<(Arc<String>, String), (u16, String)> {
+    let r = sv::parse_panel_request(body).map_err(|e| (400, e))?;
+    let gen = st.current.get();
+    let held = DashHeld::resolve(st, &gen, &r.dashboard)?;
+    let Some(roles) = held.dash(&gen).server_drawn.get(r.panel).cloned().flatten() else {
+        return Ok((json, etag));
+    };
+    let mut rows: Vec<serde_json::Map<String, serde_json::Value>> =
+        serde_json::from_str(&json).map_err(|e| (500, e.to_string()))?;
+    if rows.is_empty() {
+        return Ok((json, etag));
+    }
+    let svg =
+        anofox_visualization::host::render_panel_rows(&json, &roles, d.width, d.height, &d.ctx)
+            .map_err(|e| (500, e))?;
+    rows[0].insert("__anofox_svg".into(), serde_json::Value::String(svg));
+    let out = serde_json::to_string(&rows).map_err(|e| (500, e.to_string()))?;
+    // the picture follows the size and context, the rows don't
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    std::hash::Hash::hash(&(d.width, d.height, &d.ctx), &mut h);
+    let tag = format!(
+        "{}-d{:x}\"",
+        etag.trim_end_matches('"'),
+        std::hash::Hasher::finish(&h)
+    );
+    Ok((Arc::new(out), tag))
 }
 
 /// [`locked_panel`] for a request already parsed and validated (an export,
@@ -14711,6 +14863,7 @@ mod tests {
             id: id.into(),
             sql: script.into(),
             stmts: vec![],
+            server_drawn: vec![],
             info: vec![],
             requires: vec![],
             materialize: vec![],
@@ -14892,6 +15045,42 @@ mod tests {
             );
         } else {
             assert!(missing.contains("no plugin support"), "{missing}");
+        }
+        // #1306: {"path", "browser": false} keeps a plugin on the server
+        for bad in [
+            r#"{"plugins": [{"browser": false}]}"#,
+            r#"{"plugins": [{"path": "x.wasm", "browser": "no"}]}"#,
+            r#"{"plugins": [{"path": "x.wasm", "assets": true}]}"#,
+            r#"{"plugins": [1]}"#,
+        ] {
+            assert!(e(bad).contains("list of .wasm file paths"), "{bad}");
+        }
+        let gone = e(r#"{"plugins": [{"path": "/nonexistent/s.wasm", "browser": false}]}"#);
+        assert!(gone.contains("/nonexistent/s.wasm"), "{gone}");
+    }
+
+    #[test]
+    fn panel_draw_requests() {
+        // #1306: taken out of the body, checked; absent, the body is unchanged
+        let (b, d) = split_draw(r#"{"dashboard":"d","panel":1}"#).unwrap();
+        assert!(d.is_none() && b.contains("panel"));
+        let (b, d) = split_draw(
+            r#"{"dashboard":"d","panel":1,"draw":{"width":800,"height":480,"ctx":"{\"variant\":\"dark\"}"}}"#,
+        )
+        .unwrap();
+        let d = d.unwrap();
+        assert_eq!((d.width, d.height), (800, 480));
+        assert!(d.ctx.contains("dark"));
+        assert!(!b.contains("draw"));
+        assert!(sv::parse_panel_request(&b).is_ok());
+        for bad in [
+            r#"{"draw": 1}"#,
+            r#"{"draw": {"width": 8, "height": 400}}"#,
+            r#"{"draw": {"width": 800, "height": 99999}}"#,
+            r#"{"draw": {"width": 800, "height": 400, "x": 1}}"#,
+            r#"{"draw": {"width": 800, "height": 400, "ctx": 5}}"#,
+        ] {
+            assert!(split_draw(bad).is_err(), "{bad}");
         }
     }
 

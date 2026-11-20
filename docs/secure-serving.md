@@ -781,7 +781,9 @@ of the authoring servers carries a
     operator names (#1213; extension builds with the `plugins` feature),
     loaded at start, sandboxed (no imports, fuel, 64 MiB). `plugin_assets`
     (`true`) also serves their browser files, which run in the page outside
-    the sandbox. See docs/modules.md, *Plugins*.
+    the sandbox. An entry `{"path": "x.wasm", "browser": false}` keeps a
+    plugin on the server (#1306): the page gets its roles but never its
+    file, and its panels come drawn as SVG. See docs/modules.md, *Plugins*.
     `serve --dashboards` (mode B, script-free) has no toggle at all to
     seed — there is no client script there — so `charts_as_tables` only
     ever has an effect on `anofox_serve_dashboards`'s own dashboard pages

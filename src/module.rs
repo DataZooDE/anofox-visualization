@@ -282,6 +282,15 @@ pub fn names() -> Vec<&'static str> {
     modules().into_iter().map(|m| m.name()).collect()
 }
 
+/// The module a `Role::Module(id)` belongs to, by name.
+pub fn name_of_role(id: u16) -> Option<&'static str> {
+    REGISTRY
+        .read()
+        .ok()?
+        .get(id as usize)
+        .map(|e| e.module.name())
+}
+
 /// The module that draws a panel with these columns: the first column with
 /// a module role.
 pub fn for_columns(cols: &[Column]) -> Option<&'static dyn Module> {
