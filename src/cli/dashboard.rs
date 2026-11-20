@@ -761,7 +761,9 @@ fn render_dashboard_html(
     // usual chart render (#551: a `::SUBMIT` panel's disabled-button card —
     // this never needs the theme/opts the usual render does, so phase 1
     // builds it directly rather than threading a marker through to phase 2).
-    let mut queried: Vec<(sql::Panel, Rows, bool, Option<String>)> = Vec::new();
+    // The last element: the panel's `::SPAN` / `::HEIGHT` (#1292).
+    let mut queried: Vec<(sql::Panel, Rows, bool, Option<String>, page::Slot)> = Vec::new();
+    let mut slot = page::Slot::default();
     let mut session = crate::host::duckdb_cli::SessionRunner::spawn(None).unwrap_or_else(|e| {
         eprintln!("error: {e}");
         std::process::exit(1);
@@ -914,7 +916,13 @@ fn render_dashboard_html(
                 "Submitting needs the dashboard server"
             };
             let html = sv::submit_disabled_html(label, i, reason);
-            queried.push((p, Ok(Vec::new()), false, Some(html)));
+            queried.push((
+                p,
+                Ok(Vec::new()),
+                false,
+                Some(html),
+                std::mem::take(&mut slot),
+            ));
             continue;
         }
         // A ::FIGURE (#661) draws its cells (the statements after it, each
@@ -922,6 +930,17 @@ fn render_dashboard_html(
         let figure = p.roles.iter().any(|(_, r)| *r == Role::FigureStart);
         // Layout directives are interactive — the browser builder / `serve`
         // handle them; the static CLI output skips them (role registry).
+        if matches!(p.roles[..], [(_, Role::Span)] | [(_, Role::Height)]) {
+            let cell = exec(&format!("{};", p.sql))
+                .ok()
+                .and_then(|r| r.first().and_then(|row| row.values().next().cloned()))
+                .map(|v| match v {
+                    serde_json::Value::String(s) => s,
+                    v => v.to_string(),
+                });
+            slot.read(&p.roles, cell.as_deref());
+            continue;
+        }
         if roles::is_directive_panel(&p.roles) && !section && !step_marker && !figure {
             continue;
         }
@@ -935,7 +954,7 @@ fn render_dashboard_html(
             }
         }
         let compact = kpi_size_json(&p.roles, &rows).unwrap_or(group_compact);
-        queried.push((p, rows, compact, None));
+        queried.push((p, rows, compact, None, std::mem::take(&mut slot)));
     }
 
     let set = chrome.resolve(theme_arg).unwrap_or_else(|e| {
@@ -966,11 +985,13 @@ fn render_dashboard_html(
     // `::GUIDE_STEP` (#516): `queried` only ever holds what phase 1 kept
     // shown, so its total marker count per group ("of N") is known now.
     let mut static_steps = {
-        let shown: Vec<&sql::Panel> = queried.iter().map(|(p, _, _, _)| p).collect();
+        let shown: Vec<&sql::Panel> = queried.iter().map(|(p, ..)| p).collect();
         sql::steps::StaticSteps::new(&shown)
     };
     let mut queried = queried.into_iter().peekable();
-    while let Some((p, rows, compact, static_html)) = queried.next() {
+    while let Some((p, rows, compact, static_html, slot)) = queried.next() {
+        let (pw, ph) = slot.size();
+        let span = slot.class();
         if let Some(html) = static_html {
             panels.push_str(&html);
             n += 1;
@@ -991,7 +1012,7 @@ fn render_dashboard_html(
         // into one picture.
         if p.roles.iter().any(|(_, r)| *r == Role::FigureStart) {
             let mut cells = Vec::new();
-            while let Some((q, r, _, _)) = queried.next_if(|(q, _, _, _)| q.figure.is_some()) {
+            while let Some((q, r, ..)) = queried.next_if(|(q, ..)| q.figure.is_some()) {
                 let r = r.ok();
                 cells.push(crate::figure::Cell {
                     name: q.name.clone(),
@@ -1016,15 +1037,17 @@ fn render_dashboard_html(
                 &opts,
             )
             .unwrap_or_else(|e| error_pre(&format!("error: {e}")));
-            panels.push_str(&format!("<figure class=\"panel dp-figure\">{svg}</figure>"));
+            panels.push_str(&format!(
+                "<figure class=\"panel dp-figure{span}\">{svg}</figure>"
+            ));
             n += 1;
             continue;
         }
         // A contract plot call: one figure per result row (GROUP BY key).
         if let Some(cp) = &p.contract {
-            for (_, r) in sql::contract_call::render_rows_opts(cp, &rows, 460, 300, &opts) {
+            for (_, r) in sql::contract_call::render_rows_opts(cp, &rows, pw, ph, &opts) {
                 let svg = r.unwrap_or_else(|e| error_pre(&format!("error: {e}")));
-                panels.push_str(&format!("<figure class=\"panel\">{svg}</figure>"));
+                panels.push_str(&format!("<figure class=\"panel{span}\">{svg}</figure>"));
                 n += 1;
             }
             continue;
@@ -1084,7 +1107,7 @@ fn render_dashboard_html(
         }
         // ::TRACKs right after a chart sit under it, in its figure.
         let mut tracks = Vec::new();
-        while let Some((q, r, _, _)) = queried.next_if(|(q, _, _, _)| track::is_track(&q.roles)) {
+        while let Some((q, r, ..)) = queried.next_if(|(q, ..)| track::is_track(&q.roles)) {
             if let Ok(r) = r {
                 tracks.push((sql::columns_from_rows(&r, &q.roles), 0));
             }
@@ -1092,7 +1115,7 @@ fn render_dashboard_html(
         // #692: 'caption'::MARKDOWN_STYLE texts right after a chart go under
         // it, in its figure.
         let mut captions = String::new();
-        while let Some(c) = queried.peek().and_then(|(q, r, _, _)| {
+        while let Some(c) = queried.peek().and_then(|(q, r, ..)| {
             dashboard::caption_html(&rows, &p.roles, r.as_ref().ok()?, &q.roles, &opts)
         }) {
             queried.next();
@@ -1114,8 +1137,8 @@ fn render_dashboard_html(
                 &named_rows,
                 &p.roles,
                 &p.names,
-                460.0,
-                300.0,
+                pw as f64,
+                ph as f64,
                 &opts,
                 false,
                 &tracks,
@@ -1124,7 +1147,7 @@ fn render_dashboard_html(
             )
         } else {
             // Its ::TITLE bar, as on a dashboard card (#232).
-            render_with_title(&cols, &tracks, 460, 300, &opts)
+            render_with_title(&cols, &tracks, pw, ph, &opts)
                 .unwrap_or_else(|e| error_pre(&format!("error: {e}")))
         };
         // #536: a ::MARKDOWN panel's chrome — same resolution as the
@@ -1153,7 +1176,7 @@ fn render_dashboard_html(
             ("panel".to_string(), String::new())
         };
         panels.push_str(&format!(
-            "<figure class=\"{class}\"{icon_attrs}>{svg}{captions}</figure>"
+            "<figure class=\"{class}{span}\"{icon_attrs}>{svg}{captions}</figure>"
         ));
         n += 1;
     }

@@ -77,6 +77,57 @@ pub struct StaticPage<'a> {
     pub fit: bool,
 }
 
+/// A panel's place on a static page (#1292): the `::SPAN` (of 12 columns)
+/// and `::HEIGHT` statements right before it, as the browser and
+/// `dashboard --svg` read them. Both apply to the next panel only.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Slot {
+    pub span: Option<u32>,
+    pub height: Option<crate::height::PanelHeight>,
+}
+
+impl Slot {
+    /// Take a `::SPAN` / `::HEIGHT` statement's first cell into the slot
+    /// for the next panel; `false` when the statement is neither.
+    pub fn read(&mut self, roles: &[(usize, crate::Role)], first_cell: Option<&str>) -> bool {
+        match roles {
+            [(_, crate::Role::Span)] => {
+                self.span = first_cell
+                    .and_then(|t| t.trim().parse::<f64>().ok())
+                    .filter(|n| n.is_finite() && *n >= 1.0)
+                    .map(|n| (n as u32).min(12));
+                true
+            }
+            [(_, crate::Role::Height)] => {
+                self.height = first_cell.and_then(crate::height::PanelHeight::parse);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// The drawing size: 460 × 300 as before for a panel without either;
+    /// a span widens it in steps of a twelfth of a two-panel row (6 = 460,
+    /// 12 = 928), a height sets the height (a share of the window as of a
+    /// 900 px high one).
+    pub fn size(&self) -> (u32, u32) {
+        let w = self.span.map_or(460, |s| 78 * s.clamp(1, 12) - 8);
+        let h = self.height.map_or(300, |h| {
+            h.px(w as f64, 900.0)
+                .clamp(crate::height::MIN_PX, crate::height::MAX_PX)
+        });
+        (w, h)
+    }
+
+    /// The figure's extra class: `dp-span-N` places it on the 12-column grid
+    /// a page with any span switches to (see [`render`]).
+    pub fn class(&self) -> String {
+        self.span
+            .map(|s| format!(" dp-span-{}", s.clamp(1, 12)))
+            .unwrap_or_default()
+    }
+}
+
 /// Does a static page fit its panels to the window (#400)? Only for a
 /// dashboard-wide `::FIT`: one outside any `::VIEW` in a dashboard with no
 /// `::TAB` / `::SUBTAB` — a static page flattens tabs (every tab's panels on
@@ -182,7 +233,7 @@ pub fn render(p: &StaticPage) -> String {
         "<!doctype html><html lang=\"{lang}\" data-theme=\"{name}\" data-variant=\"{variant}\"><head><meta charset=\"utf-8\">\
 <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">{head_extra}{favicon}<title>{title}</title>\
 <style>{css}{fit_css}</style></head>\
-<body class=\"dp-static{fit_class}\"><div class=\"grid\">{header}{sub}{controls}{panels}</div>\
+<body class=\"dp-static{fit_class}\"><div class=\"grid{spans}\">{header}{sub}{controls}{panels}</div>\
 <div id=\"dp-tip\" class=\"dp-tip\"></div><script>{HOVER_SCRIPT}{ASOF_SCRIPT}{CONTROLS_SCRIPT}{stepper}{nocase}</script></body></html>",
         lang = esc(t.locale.as_deref().unwrap_or("en")),
         name = esc(&t.name),
@@ -199,6 +250,7 @@ pub fn render(p: &StaticPage) -> String {
         controls = p.controls_html,
         fit_css = if p.fit { FIT_CSS } else { "" },
         fit_class = if p.fit { " dp-fit" } else { "" },
+        spans = if p.panels_html.contains(" dp-span-") { " dp-spans" } else { "" },
         stepper = if p.panels_html.contains("data-story=") { stepper_script() } else { String::new() },
         nocase = if [&header, p.controls_html.as_str(), p.panels_html.as_str()].iter().any(|h| has_greek(h)) {
             nocase_script()
@@ -732,6 +784,57 @@ mod tests {
         // without @nav, the title is the label and gets no such tooltip
         assert!(html.contains(">Ops board<"));
         assert!(!html.contains("title=\"Ops board\""));
+    }
+}
+
+#[cfg(test)]
+mod slot_tests {
+    use super::*;
+    use crate::height::PanelHeight;
+    use crate::Role;
+
+    /// #1292: a ::SPAN / ::HEIGHT statement sizes the next panel; nothing
+    /// set keeps the old 460 × 300.
+    #[test]
+    fn span_and_height_size_the_panel() {
+        let mut s = Slot::default();
+        assert_eq!(s.size(), (460, 300));
+        assert_eq!(s.class(), "");
+        assert!(s.read(&[(0, Role::Span)], Some("12")));
+        assert!(s.read(&[(0, Role::Height)], Some("680")));
+        assert_eq!(s.size(), (928, 680));
+        assert_eq!(s.class(), " dp-span-12");
+        let mut s = Slot::default();
+        s.read(&[(0, Role::Span)], Some("6"));
+        assert_eq!(s.size(), (460, 300));
+        // a ratio of the width; out-of-range spans clamp; junk is ignored
+        let mut s = Slot::default();
+        s.read(&[(0, Role::Span)], Some("40"));
+        s.height = Some(PanelHeight::Ratio(0.5));
+        assert_eq!(s.size(), (928, 464));
+        let mut s = Slot::default();
+        s.read(&[(0, Role::Span)], Some("wide"));
+        assert_eq!(s, Slot::default());
+        assert!(!s.read(&[(0, Role::Title)], Some("x")));
+    }
+
+    #[test]
+    fn a_page_with_a_span_gets_the_twelve_column_grid() {
+        let t = theme::default_light();
+        let page = |panels: &str| {
+            render(&StaticPage {
+                theme: &t,
+                fallback_title: "t",
+                subtitle_html: String::new(),
+                head_extra: String::new(),
+                controls_html: String::new(),
+                panels_html: panels.into(),
+                fit: false,
+            })
+        };
+        assert!(page("<figure class=\"panel dp-span-12\"></figure>")
+            .contains("class=\"grid dp-spans\""));
+        assert!(page("<figure class=\"panel\"></figure>").contains("class=\"grid\""));
     }
 }
 
