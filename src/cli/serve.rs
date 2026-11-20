@@ -3053,7 +3053,14 @@ fn render_dashboard_page(
     // see `dashboard::execute`'s identical `step_n` for why "of N" can't be
     // filled in here (phase 2 does it, once every step is collected).
     let mut step_n: std::collections::HashMap<usize, u32> = std::collections::HashMap::new();
+    // `::SPAN` / `::HEIGHT` (#1292): the next shown panel's place and size,
+    // by plan index.
+    let mut slot = page::Slot::default();
+    let mut slots: std::collections::HashMap<usize, page::Slot> = std::collections::HashMap::new();
     for (i, panel) in sql::plan(&dash.script).into_iter().enumerate() {
+        if let Some(&at) = queried_at.last().filter(|at| !slots.contains_key(at)) {
+            slots.insert(at, std::mem::take(&mut slot));
+        }
         let hidden = sections.step(&panel, |reqs| {
             requires_unmet(st, &prefix, reqs, &mut req_cache)
         });
@@ -3238,6 +3245,22 @@ fn render_dashboard_page(
         // figure's options); phase 2 draws its cells — the statements after
         // it carrying `figure` — as one picture.
         let figure = panel.roles.iter().any(|(_, r)| *r == Role::FigureStart);
+        if matches!(panel.roles[..], [(_, Role::Span)] | [(_, Role::Height)]) {
+            let q = format!(
+                "{prefix}SELECT * FROM (\n{}\n) LIMIT 1",
+                panel.sql.trim().trim_end_matches(';')
+            );
+            let rows: Rows = page_rows(st, &q)?;
+            let cell = rows
+                .first()
+                .and_then(|r| r.values().next())
+                .map(|v| match v {
+                    serde_json::Value::String(s) => s.clone(),
+                    v => v.to_string(),
+                });
+            slot.read(&panel.roles, cell.as_deref());
+            continue;
+        }
         // Skip interactive/layout-only directives (params drive re-render instead).
         if chrome_role.is_none()
             && !section
@@ -3332,6 +3355,9 @@ fn render_dashboard_page(
         queried_at.push(i);
         queried.push((panel, rows, false, compact, None));
     }
+    if let Some(&at) = queried_at.last().filter(|at| !slots.contains_key(at)) {
+        slots.insert(at, slot);
+    }
     let set = chrome.resolve(theme_default()).map_err(PageError::Server)?;
     let t = set.default_variant().clone();
     let opts = RenderOptions {
@@ -3371,6 +3397,9 @@ fn render_dashboard_page(
     };
     let mut queried = queried_at.into_iter().zip(queried).peekable();
     while let Some((at, (panel, rows, na, compact, static_html))) = queried.next() {
+        let slot = slots.get(&at).copied().unwrap_or_default();
+        let (pw, ph) = slot.size();
+        let span = slot.class();
         if let Some(html) = static_html {
             panels.push_str(&html);
             continue;
@@ -3427,12 +3456,12 @@ fn render_dashboard_page(
                 PANEL_RENDER_ERROR_HTML.to_string()
             });
             panels.push_str(&format!(
-                "<figure class=\"panel dp-figure\" id=\"panel-{at}\">{svg}</figure>"
+                "<figure class=\"panel dp-figure{span}\" id=\"panel-{at}\">{svg}</figure>"
             ));
             continue;
         }
         if let Some(cp) = &panel.contract {
-            for (_, r) in sql::contract_call::render_rows_opts(cp, &rows, 460, 300, &opts) {
+            for (_, r) in sql::contract_call::render_rows_opts(cp, &rows, pw, ph, &opts) {
                 let svg = r.unwrap_or_else(|e| {
                     eprintln!(
                         "[anofox-serve] dashboard '{}' panel render failed: {}",
@@ -3442,7 +3471,7 @@ fn render_dashboard_page(
                     PANEL_RENDER_ERROR_HTML.to_string()
                 });
                 panels.push_str(&format!(
-                    "<figure class=\"panel\" id=\"panel-{at}\">{svg}</figure>"
+                    "<figure class=\"panel{span}\" id=\"panel-{at}\">{svg}</figure>"
                 ));
             }
             continue;
@@ -3531,8 +3560,8 @@ fn render_dashboard_page(
                     &sql::result_columns(&rows),
                     &panel.roles,
                     &panel.names,
-                    460.0,
-                    300.0,
+                    pw as f64,
+                    ph as f64,
                     &opts,
                     false,
                     &tracks,
@@ -3540,7 +3569,7 @@ fn render_dashboard_page(
                     compact,
                 ))
             } else {
-                render_with_title(&cols, &tracks, 460, 300, &opts).map_err(|e| e.to_string())
+                render_with_title(&cols, &tracks, pw, ph, &opts).map_err(|e| e.to_string())
             }
         })
         .unwrap_or_else(|e| {
@@ -3577,7 +3606,7 @@ fn render_dashboard_page(
             ("panel".to_string(), String::new())
         };
         panels.push_str(&format!(
-            "<figure class=\"{class}\" id=\"panel-{at}\"{icon_attrs}>{svg}{captions}</figure>"
+            "<figure class=\"{class}{span}\" id=\"panel-{at}\"{icon_attrs}>{svg}{captions}</figure>"
         ));
     }
 

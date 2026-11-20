@@ -525,3 +525,61 @@ fn a_table_panel_shows_its_rows() {
     }
     drop(server);
 }
+
+/// #1292: `::SPAN` / `::HEIGHT` before a panel size it on the script-free
+/// page (not a fixed 460 × 300) and place it on a 12-column grid.
+#[test]
+fn span_and_height_size_a_served_panel() {
+    if !have_duckdb("span_and_height_size_a_served_panel") {
+        return;
+    }
+    let s = Scratch::new("span");
+    let dash = s.0.join("dash");
+    std::fs::create_dir_all(&dash).unwrap();
+    std::fs::write(
+        dash.join("wide.sql"),
+        "SELECT 12 ::SPAN;\nSELECT 680 ::HEIGHT;\n\
+         SELECT 'a' AS x ::XAXIS, 1 AS y ::BARCHART;\n\
+         SELECT 'b' AS x ::XAXIS, 2 AS y ::BARCHART;\n",
+    )
+    .unwrap();
+    let port = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let server = Kill(Some(
+        Command::new(env!("CARGO_BIN_EXE_serve"))
+            .arg("--dashboards")
+            .arg(&dash)
+            .args(["--port", &port.to_string(), "--no-open"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap(),
+    ));
+    let resp = http_get(port, "/d/wide");
+    assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
+    let body = http_body(&resp);
+    assert!(body.contains("class=\"grid dp-spans\""), "{body}");
+    let figs: Vec<&str> = body.split("<figure ").skip(1).collect();
+    assert_eq!(figs.len(), 2, "{body}");
+    assert!(
+        figs[0].starts_with("class=\"panel dp-span-12\""),
+        "{}",
+        figs[0]
+    );
+    assert!(
+        figs[0].contains("viewBox=\"0 0 928 680\""),
+        "{}",
+        &figs[0][..300]
+    );
+    // the next panel is back to the default
+    assert!(figs[1].starts_with("class=\"panel\""), "{}", figs[1]);
+    assert!(
+        figs[1].contains("viewBox=\"0 0 460 300\""),
+        "{}",
+        &figs[1][..300]
+    );
+    drop(server);
+}
