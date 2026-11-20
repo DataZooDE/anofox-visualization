@@ -1822,7 +1822,10 @@ appends each save to a file no SQL reaches; the snapshot stays read-only.
   key next to `id` (`"key": ["id", "who"]`), so each writer keeps a row of
   their own per key — the experts' `answers` of *Clarifying a learned graph
   with experts* in `docs/DOCS.md`; a `ts` column can't be. Only in
-  `options.writeback` (not a scenario's table).
+  `options.writeback` (not a scenario's table). Stamped values are the
+  server's own, so `text_max_chars` doesn't cap them (a long login still
+  saves). Every viewer of a dashboard that reads the stamped table sees
+  each writer's login in it; an access policy can mask that column.
 - **Who.** `auth` is required; the viewer must be a personal sign-in (no API
   key, no shared embed identity) listed in `writers` by user or group, and
   the dashboard must be in `dashboards` and in the credential's scope.

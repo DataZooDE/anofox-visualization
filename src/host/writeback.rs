@@ -643,6 +643,9 @@ fn change(table: &str, op: &str, rows: Vec<Value>) -> Value {
 }
 
 /// One row: every field declared and coerced, every key column non-null.
+/// A stamped column (#1282) is the server's own value (the login, the
+/// time), never the page's: no `text_max_chars` cap on it, so a long login
+/// can still save.
 pub fn typed_row(
     table: &str,
     decl: &TableDecl,
@@ -654,9 +657,14 @@ pub fn typed_row(
         let ty = decl
             .col(f)
             .ok_or_else(|| format!("'{f}' is not a column of '{table}' (options.writeback)"))?;
+        let cap = if decl.stamp.iter().any(|(c, _)| c == f) {
+            usize::MAX
+        } else {
+            text_max
+        };
         row.insert(
             f.clone(),
-            coerce(ty, v, text_max).map_err(|e| format!("{table}.{f}: {e}"))?,
+            coerce(ty, v, cap).map_err(|e| format!("{table}.{f}: {e}"))?,
         );
     }
     for k in &decl.key {
@@ -1315,6 +1323,18 @@ mod tests {
             [row("ann"), row("bob"), row("ann")].into_iter(),
         );
         assert_eq!(now.rows.len(), 2);
+        // a login longer than text_max_chars still saves (the server's value)
+        let long = "x".repeat(o.text_max_chars + 50) + "@example.com";
+        assert_eq!(row(&long)["who"], json!(long));
+        // …while the page's own text keeps the cap
+        let big = req(
+            json!({"key": "smoke|lung", "form": {"rationale": "y".repeat(o.text_max_chars + 1)}}),
+        );
+        assert!(
+            build_changes_as(&o, &t, &big, Some(("ann", "2026-11-20T10:15:00Z")))
+                .unwrap_err()
+                .contains("answers.rationale")
+        );
         // without a login (no stamp) the key has no value: refused
         assert!(build_changes(&o, &t, &r)
             .unwrap_err()
