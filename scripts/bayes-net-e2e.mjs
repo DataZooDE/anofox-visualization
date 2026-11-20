@@ -160,6 +160,36 @@ check(/^Given Wet grass, Rain rose from 50% to 71%, Sprinkler on rose from 30% t
 const under = await page.evaluate(() => [...document.querySelectorAll("svg[data-diagram]")[0].querySelectorAll(":scope > text")].map((t) => t.textContent).join(" "));
 check(/^Given Wet grass, Rain rose from 50% to 71%/.test(under), "…also as a line under the graph", under);
 check(/v\.sprinkler_ev=/.test(page.url()), "the evidence is in the address", page.url());
+// #1311: only a network's states and nodes write the evidence. A click on an
+// arc, or on a mark without data-bn (a plugin's own shape; here a node with
+// its data-bn taken off), leaves it alone
+const evUrl = page.url();
+const offBn = async (sel, strip) =>
+  page.evaluate(
+    ([sel, strip]) => {
+      const e = document.querySelectorAll("svg[data-diagram]")[0].querySelector(sel);
+      if (!e) return null;
+      if (strip) e.removeAttribute("data-bn");
+      e.scrollIntoView({ block: "center" });
+      const ctm = e.getScreenCTM();
+      const p = e.tagName === "polyline" ? e.getPointAtLength(e.getTotalLength() / 2) : { x: +e.getAttribute("x") + 4, y: +e.getAttribute("y") + 4 };
+      const q = new DOMPoint(p.x, p.y).matrixTransform(ctm);
+      return { x: q.x, y: q.y };
+    },
+    [sel, strip]
+  );
+for (const [what, sel, strip] of [
+  ["an arc", 'polyline[data-edge="sprinkler>grass"]', false],
+  ["a mark without data-bn", 'rect[data-node="cloudy"]', true],
+]) {
+  const p = await offBn(sel, strip);
+  check(!!p, what + " is drawn", p);
+  if (p) await page.mouse.click(p.x, p.y);
+  await page.waitForTimeout(1200);
+  const sx = await state(0);
+  check(sx.chips.join("|") === "Wet grass = yes" && sx.vals["rain.yes"] === "71%", "a click on " + what + " leaves the evidence alone", { chips: sx.chips, vals: sx.vals });
+  check(page.url() === evUrl && !errors.length, "…the address keeps it, no error", { url: page.url(), errors });
+}
 const quiet = async (k) => {
   await net(k).evaluate((el) => window.scrollTo(0, el.getBoundingClientRect().top + window.scrollY - 120));
   const b = await net(k).boundingBox();

@@ -21674,6 +21674,9 @@ function attachHover() {
         return followLink(chartLink(ia.link, el, key, series));
       }
       if (trackSvg) return toggleTrackShade(el);
+      // #1311: an evidence selection is written by a network's states and
+      // nodes only (bnClick above); an arc or a plugin's own shape leaves it alone
+      if (ia && ia.select && ia.select.mode === "evidence") return;
       if (ia && ia.select) return clickNamedSelection(ia.select, series, e.shiftKey || e.ctrlKey || e.metaKey);
       // Cross-filter: toggle `selected` to this value and re-query. Queries that
       // opt in (getvariable('selected')) filter; the rest just highlight it.
@@ -23191,7 +23194,7 @@ function toggleBrush(panel) {
     // A ::SELECT_AS chart turns the brush into variables: the brushed x range
     // (<name>_from / <name>_to) on a continuous / date x, the brushed values on a
     // discrete x in multi mode.
-    if (!sel) return;
+    if (!sel || sel.mode === "evidence") return; // #1311: no brush into evidence
     const hit = [...marksOf(panel)].filter(inBox);
     if (xKind) {
       const xs = hit.map((el) => xVal(el.getAttribute("data-x") || "", xKind)).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
