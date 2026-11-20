@@ -291,13 +291,14 @@ fn a_static_page_keeps_the_tracks_under_the_chart() {
 }
 
 /// #251 (sec-review-250 L1): a static page cuts a long title to 200 characters
-/// and an ellipsis.
+/// and an ellipsis — on a panel wide enough to hold them (a narrower bar cuts
+/// to its width first, `tests/title_bar_fit.rs`).
 #[test]
 fn a_static_page_caps_a_long_title() {
     let o = RenderOptions::default();
     let bar_text = |raw: &str| -> String {
         let json = serde_json::to_string(raw).unwrap();
-        let html = render_with_title(&page_bars(&json, "null"), &[], 460, 300, &o).unwrap();
+        let html = render_with_title(&page_bars(&json, "null"), &[], 8000, 300, &o).unwrap();
         let (bar, _) = split_bar(&html);
         let doc = roxmltree::Document::parse(bar).unwrap();
         child(doc.root_element(), "text")

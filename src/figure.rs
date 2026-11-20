@@ -683,7 +683,7 @@ pub fn render_with_title(
         Some(t) => format!(
             "{open}{text}</svg>{body}",
             open = crate::svg_open(Place::Doc, width, crate::TITLE_BAR_H),
-            text = crate::title_bar_text(&t, o),
+            text = crate::title_bar_text(&t, Some(width), o),
         ),
         None => body,
     })
