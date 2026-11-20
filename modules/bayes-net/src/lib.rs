@@ -10,6 +10,7 @@ use anofox_viz_plugin::{
 use serde_json::{Map, Value as J};
 
 mod bayes_net;
+mod causal;
 
 type Row = Map<String, J>;
 
@@ -34,6 +35,8 @@ impl Plugin for BayesNet {
             ("tables", "NULL"),
             ("paths", "NULL"),
             ("policy", "NULL"),
+            ("adjust", "NULL"),
+            ("reference", "NULL"),
             ("threshold", "0.5"),
             ("direction", "'TB'"),
             ("width", "900"),
@@ -46,6 +49,8 @@ impl Plugin for BayesNet {
             ContractOption { key: "tables", param: "tables", fallback_var: None },
             ContractOption { key: "paths", param: "paths", fallback_var: None },
             ContractOption { key: "policy", param: "policy", fallback_var: None },
+            ContractOption { key: "adjust", param: "adjust", fallback_var: None },
+            ContractOption { key: "reference", param: "reference", fallback_var: None },
             ContractOption { key: "threshold", param: "threshold", fallback_var: None },
             ContractOption { key: "direction", param: "direction", fallback_var: None },
         ],
@@ -70,8 +75,15 @@ parent_states, option, expected_utility, chosen) draws a decision's policy as a 
 configuration of its informational parents, a column per option with its expected utility, the chosen one marked, \
 the configuration the evidence picks on a band; a click on an option decides it); arcs into a decision are \
 information arcs, drawn dotted; a beliefs row of a utility node with expected_utility and no state is written in \
-its diamond. Lint: cycles, unknown ids, beliefs not summing to 1, unknown states, bad modes or likelihoods, path \
-steps along no arc or out of order, policy options, parent_states and chosen options that do not fit.",
+its diamond. Causal views: adjust := a LIST of (treatment, outcome, set_id, node, kind: minimal | optimal | \
+canonical | front-door) marks the treatment X, the outcome Y, the first set's nodes ringed and front-door mediators \
+M, the back-door paths dashed (red when open, a bar where the set blocks them), the causal paths in the accent \
+colour; beliefs with a world column (factual | counterfactual) draw the twin network, the nodes a do reaches twice \
+(the copy's id ends in *), the rest shared; reference := a LIST of (from, to) draws the learned arcs (strength at or \
+above threshold) against it: matching, extra, reversed, missing dashed, and the structural Hamming distance. Lint: \
+cycles, unknown ids, beliefs not summing to 1, unknown states, bad modes or likelihoods, path steps along no arc or \
+out of order, policy options, parent_states and chosen options that do not fit, adjustment sets that leave a \
+back-door path open or hold a node downstream of the treatment.",
         example: "SELECT anofox_plot_bayes_net(n, arcs := [{'from': 'rain', 'to': 'grass'}], beliefs := \
 [{'node': 'rain', 'state': 'yes', 'probability': 0.2}, {'node': 'rain', 'state': 'no', 'probability': 0.8}]) FROM \
 (VALUES ('rain', 'Rain', 'chance', ['yes', 'no']), ('grass', 'Wet grass', 'chance', ['yes', 'no'])) \
@@ -79,10 +91,25 @@ n(id, label, kind, states)",
     }];
 
     fn render_contract(input: &ContractInput) -> Result<ContractOutput, String> {
+        // #1278: the counterfactual twin network, when the beliefs come in
+        // two worlds
+        let twin = causal::twin(&input.rows, &input.options)?;
+        let (rows, options) = match &twin {
+            Some((r, o)) => (r.as_slice(), o),
+            None => (input.rows.as_slice(), &input.options),
+        };
+        let mut columns = bayes_net::columns(rows, options)?;
+        // #1278: adjustment sets, the structure diff
+        causal::decorate(&mut columns, rows, options)?;
+        let mut root_attrs = bayes_net::root_attrs(options)?;
+        root_attrs.extend(causal::root_attrs(options)?);
+        // the network as drawn (a twin's two worlds as two nodes each)
+        let mut warnings = bayes_net::lint(rows, options);
+        warnings.extend(causal::lint(&input.rows, &input.options));
         Ok(ContractOutput::Columns {
-            columns: bayes_net::columns(&input.rows, &input.options)?,
-            root_attrs: bayes_net::root_attrs(&input.options)?,
-            warnings: bayes_net::lint(&input.rows, &input.options),
+            columns,
+            root_attrs,
+            warnings,
         })
     }
 }

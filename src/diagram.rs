@@ -146,6 +146,65 @@ pub struct Edge {
     /// Cut (`::EDGES` `cut`, #1276): its child is set by an intervention,
     /// so the parent no longer acts on it — drawn grey with a break mark.
     pub cut: bool,
+    /// Its colour, blocked mark and legend entry (#1278).
+    pub marks: EdgeMarks,
+}
+
+/// An edge's colour, blocked mark and legend entry (`::EDGES` `color`,
+/// `blocked`, `key`, #1278): a causal diagram's back-door paths, a
+/// structure diff's matching / extra / missing / reversed arcs.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct EdgeMarks {
+    /// `color`: a status word (`good`, `warn`, `bad`, `neutral`), `accent`
+    /// (the palette's first colour), a palette slot (a number) or
+    /// `#rrggbb`.
+    pub color: Option<EdgeColor>,
+    /// `blocked`: a bar across the edge (a path through it is closed).
+    pub blocked: bool,
+    /// `key`: the edge's entry in the legend under the graph (its colour
+    /// and line, then this text).
+    pub key: Option<String>,
+}
+
+/// An `::EDGES` item's `color`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum EdgeColor {
+    Level(crate::thresholds::LevelColor),
+    /// A palette slot (`accent` is 0).
+    Slot(usize),
+}
+
+impl EdgeColor {
+    fn parse(v: &J) -> Option<EdgeColor> {
+        match v {
+            J::Number(n) => n.as_u64().map(|k| EdgeColor::Slot(k as usize)),
+            J::String(s) => {
+                let s = s.trim();
+                if s.eq_ignore_ascii_case("accent") || s.eq_ignore_ascii_case("brand") {
+                    return Some(EdgeColor::Slot(0));
+                }
+                if let Ok(k) = s.parse::<usize>() {
+                    return Some(EdgeColor::Slot(k));
+                }
+                // a status word or #rrggbb, as in a ::COLORS level map
+                (!s.contains([':', ';', ',']))
+                    .then(|| crate::thresholds::parse_level_colors(&format!("c:{s}")).ok())
+                    .flatten()
+                    .and_then(|v| v.first().map(|(_, c)| EdgeColor::Level(*c)))
+            }
+            _ => None,
+        }
+    }
+
+    fn rgb(self, t: &crate::theme::ResolvedTheme) -> crate::theme::Rgb {
+        match self {
+            EdgeColor::Level(crate::thresholds::LevelColor::Status(Status::Neutral)) => {
+                t.colors.muted
+            }
+            EdgeColor::Level(l) => l.rgb(t),
+            EdgeColor::Slot(k) => t.color(k),
+        }
+    }
 }
 
 /// Something the author should know (`dashboard --check`: `diagram/*`).
@@ -179,6 +238,9 @@ pub struct Diagram {
     /// Story steps along edges (`::EDGES` `steps`, #1152), in step order: a
     /// message passed along an edge, lit with its direction.
     pub messages: Vec<Message>,
+    /// What the edge legend ends with (`::EDGES` `caption`, #1278: a
+    /// structure diff's distance).
+    pub edge_caption: Option<String>,
 }
 
 /// A node's belief over the iterations (#1166).
@@ -282,6 +344,13 @@ pub struct States {
     pub card: String,
     /// A decision's policy (#1279), drawn as a table in its box.
     pub policy: Option<policy::Policy>,
+    /// Its part in a causal diagram (#1278): `treatment`, `outcome`,
+    /// `adjust` (in the adjustment set: ringed) or `mediator` (a
+    /// front-door mediator) — X, Y and M in its badge.
+    pub causal: Option<String>,
+    /// Its world in a twin network (#1278): `factual`, `counterfactual`
+    /// or `shared`.
+    pub world: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -341,6 +410,12 @@ impl States {
             evidence,
             card: v.to_string(),
             policy: field(o, &["policy"]).and_then(policy::Policy::parse),
+            causal: field(o, &["causal"])
+                .and_then(json_id)
+                .map(|c| c.to_ascii_lowercase()),
+            world: field(o, &["world"])
+                .and_then(json_id)
+                .map(|c| c.to_ascii_lowercase()),
         })
     }
 
@@ -712,6 +787,7 @@ impl Diagram {
         // Edges: (from id, to id, value, label, style), merged by (from, to).
         let mut raw: Vec<RawEdge> = Vec::new();
         let mut bad_styles: Vec<String> = Vec::new();
+        let mut edge_caption: Option<String> = None;
         if let Some(e) = edges_col {
             let cell = e.values.iter().find(|v| !matches!(v, Value::Na));
             if let Some(cell) = cell {
@@ -749,6 +825,9 @@ impl Diagram {
                                     }
                                     st
                                 });
+                            if edge_caption.is_none() {
+                                edge_caption = field(o, &["caption"]).and_then(json_id).filter(|c| !c.is_empty());
+                            }
                             // a health word (`ok`, `delayed`, `failed`, …) colours the edge
                             let status = field(o, &["status"]).and_then(json_id).and_then(|w| badge_status(&w));
                             raw.push(RawEdge {
@@ -765,6 +844,12 @@ impl Diagram {
                                 status,
                                 math: field(o, &["math"]).and_then(J::as_bool).unwrap_or(false),
                                 cut: field(o, &["cut"]).and_then(J::as_bool).unwrap_or(false),
+                                // #1278
+                                marks: EdgeMarks {
+                                    color: field(o, &["color", "colour"]).and_then(EdgeColor::parse),
+                                    blocked: field(o, &["blocked"]).and_then(J::as_bool).unwrap_or(false),
+                                    key: field(o, &["key"]).and_then(json_id).filter(|k| !k.is_empty()),
+                                },
                                 steps: edge_steps(field(o, &["steps"])),
                             });
                         }
@@ -837,6 +922,7 @@ impl Diagram {
             tip,
             width,
             cut,
+            marks,
         } in raw
         {
             let (Some(f), Some(t)) = (index(&from, &nodes), index(&to, &nodes)) else {
@@ -866,6 +952,9 @@ impl Diagram {
                     e.tip = e.tip.take().or(tip);
                     e.width = e.width.or(width);
                     e.cut |= cut;
+                    e.marks.color = e.marks.color.or(marks.color);
+                    e.marks.blocked |= marks.blocked;
+                    e.marks.key = e.marks.key.take().or(marks.key);
                     styles[k] = styles[k].or(style);
                 }
                 None => {
@@ -883,6 +972,7 @@ impl Diagram {
                             tip,
                             width,
                             cut,
+                            marks,
                         });
                         styles.push(style);
                     }
@@ -956,6 +1046,7 @@ impl Diagram {
             problems,
             category_colors,
             messages,
+            edge_caption,
         })
     }
 
@@ -1220,6 +1311,7 @@ struct RawEdge {
     tip: Option<String>,
     width: Option<f64>,
     cut: bool,
+    marks: EdgeMarks,
     /// Story steps along the edge: (order, caption, against the edge,
     /// iteration).
     steps: Vec<(f64, String, bool, Option<f64>)>,
@@ -1557,6 +1649,10 @@ const STORY_MIN: f64 = 0.02;
 /// prior; then, when the beliefs before the last change are given and
 /// differ, which one that change moved most. `None` without evidence.
 fn bn_story(d: &Diagram) -> Option<String> {
+    // #1278: a twin network tells what the change did across the worlds
+    if let Some(t) = twin_story(d) {
+        return Some(t);
+    }
     let evidence: Vec<String> = d
         .nodes
         .iter()
@@ -1648,6 +1744,75 @@ fn bn_story(d: &Diagram) -> Option<String> {
         ));
     }
     Some(out)
+}
+
+/// What a twin network (#1278) says: "If Got the discount had been set to
+/// no: Renewed yes 80% (as it happened 100%), Uses it weekly yes 57% (as
+/// it happened 81%)." — each counterfactual node against its factual twin
+/// (same label), the ones that moved most first, at most three. `None`
+/// without a counterfactual world.
+fn twin_story(d: &Diagram) -> Option<String> {
+    let world = |nd: &Node| nd.states.as_ref().and_then(|st| st.world.clone());
+    let cf: Vec<&Node> = d
+        .nodes
+        .iter()
+        .filter(|nd| world(nd).as_deref() == Some("counterfactual"))
+        .collect();
+    if cf.is_empty() {
+        return None;
+    }
+    let set: Vec<String> = cf
+        .iter()
+        .filter_map(|nd| {
+            let st = nd.states.as_ref()?;
+            st.intervened().then(|| {
+                format!(
+                    "{} had been set to {}",
+                    nd.label,
+                    st.observed().unwrap_or("?")
+                )
+            })
+        })
+        .collect();
+    let mut moves: Vec<(f64, String)> = cf
+        .iter()
+        .filter(|nd| !nd.states.as_ref().is_some_and(States::intervened))
+        .filter_map(|nd| {
+            let fact = d
+                .nodes
+                .iter()
+                .find(|f| f.label == nd.label && world(f).as_deref() == Some("factual"))?;
+            let (s, p) = nd.states.as_ref()?.top()?;
+            let q = fact
+                .states
+                .as_ref()?
+                .rows
+                .iter()
+                .find(|r| r.state == s)?
+                .p?;
+            Some((
+                (p - q).abs(),
+                format!(
+                    "{} {s} {} (as it happened {})",
+                    nd.label,
+                    percent(p),
+                    percent(q)
+                ),
+            ))
+        })
+        .collect();
+    moves.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let moves: Vec<String> = moves.into_iter().take(3).map(|m| m.1).collect();
+    let had = if set.is_empty() {
+        "In the counterfactual world".to_string()
+    } else {
+        format!("If {}", list_names(&set))
+    };
+    Some(if moves.is_empty() {
+        format!("{had}: nothing downstream changes.")
+    } else {
+        format!("{had}: {}.", list_names(&moves))
+    })
 }
 
 /// The steps in reading order, each with its value, status and where it
@@ -1753,6 +1918,75 @@ fn fg_look(t: &crate::theme::ResolvedTheme) -> FgLook {
     }
 }
 
+/// The edge legend laid out in rows that fit `w`: (text, swatch colour
+/// (none: the caption), dashed, width incl. the gap after it).
+type LegendItem = (String, Option<crate::theme::Rgb>, bool, f64);
+
+fn legend_rows(d: &Diagram, t: &crate::theme::ResolvedTheme, w: f64) -> Vec<Vec<LegendItem>> {
+    let tw = |s: &str| ggplot_rs::render::text::text_width(s, 11.0);
+    let mut items: Vec<LegendItem> = edge_legend(d, t)
+        .into_iter()
+        .map(|(k, c, dashed)| {
+            let width = 23.0 + tw(&k) + 16.0;
+            (k, Some(c), dashed, width)
+        })
+        .collect();
+    if items.is_empty() {
+        return Vec::new();
+    }
+    if let Some(c) = &d.edge_caption {
+        items.push((c.clone(), None, false, tw(c)));
+    }
+    let mut rows: Vec<Vec<LegendItem>> = vec![Vec::new()];
+    for it in items {
+        let used: f64 = rows.last().map_or(0.0, |r| r.iter().map(|x| x.3).sum());
+        if used > 0.0 && used + it.3 > w - 16.0 && rows.len() < 3 {
+            rows.push(Vec::new());
+        }
+        if let Some(r) = rows.last_mut() {
+            r.push(it);
+        }
+    }
+    rows
+}
+
+/// An edge's colour: cut grey, its own colour (#1278), its health (warn /
+/// bad), a flowing edge in the brand colour, else the line colour.
+fn edge_rgb(e: &Edge, t: &crate::theme::ResolvedTheme, fg: Option<&FgLook>) -> crate::theme::Rgb {
+    let muted = t.colors.muted;
+    match (e.status, e.style) {
+        // #1276: cut by an intervention, grey
+        _ if e.cut => mix(t.colors.card, muted, 0.45),
+        // #1278: a colour of its own (a causal path, a diff's kind)
+        _ if e.marks.color.is_some() => e.marks.color.map_or(muted, |c| c.rgb(t)),
+        (Some(st @ (Status::Bad | Status::Warn)), _) => st.color(t),
+        (_, EdgeStyle::Flow(_) | EdgeStyle::Dots(_)) => t.color(0),
+        _ => fg.map_or(muted, |f| f.line),
+    }
+}
+
+/// The edge legend (#1278): each `key` once, in edge order, with the first
+/// such edge's colour and whether it is dashed.
+fn edge_legend(
+    d: &Diagram,
+    t: &crate::theme::ResolvedTheme,
+) -> Vec<(String, crate::theme::Rgb, bool)> {
+    let fg = d.factor_graph().then(|| fg_look(t));
+    let mut out: Vec<(String, crate::theme::Rgb, bool)> = Vec::new();
+    for e in &d.edges {
+        if let Some(k) = &e.marks.key {
+            if !out.iter().any(|x| x.0 == *k) {
+                out.push((
+                    k.clone(),
+                    edge_rgb(e, t, fg.as_ref()),
+                    e.style != EdgeStyle::Solid,
+                ));
+            }
+        }
+    }
+    out
+}
+
 /// The drawing as a nested `<svg>` of `pw` × `ph` (the layout's own size).
 fn draw(d: &Diagram, p: &Placed, pw: u32, ph: u32, o: &RenderOptions) -> String {
     use ggplot_rs::graph::{self, DrawEdge, DrawNode, EdgeLine, GraphStyle};
@@ -1771,14 +2005,7 @@ fn draw(d: &Diagram, p: &Placed, pw: u32, ph: u32, o: &RenderOptions) -> String 
                 EdgeStyle::Dashed | EdgeStyle::Flow(_) => EdgeLine::Dashed,
                 EdgeStyle::Dots(_) | EdgeStyle::Dotted => EdgeLine::Dots,
             };
-            // health first (warn / bad), else a flowing edge in the brand colour
-            let colour = match (e.status, e.style) {
-                // #1276: cut by an intervention, grey
-                _ if e.cut => mix(t.colors.card, muted, 0.45),
-                (Some(st @ (Status::Bad | Status::Warn)), _) => st.color(t),
-                (_, EdgeStyle::Flow(_) | EdgeStyle::Dots(_)) => t.color(0),
-                _ => fg.as_ref().map_or(muted, |f| f.line),
-            };
+            let colour = edge_rgb(e, t, fg.as_ref());
             let class = match e.style {
                 EdgeStyle::Solid | EdgeStyle::Dashed | EdgeStyle::Dotted => None,
                 EdgeStyle::Flow(_) => Some("dp-flow"),
@@ -1849,12 +2076,17 @@ fn draw(d: &Diagram, p: &Placed, pw: u32, ph: u32, o: &RenderOptions) -> String 
                     attr("back", p.back[k].then(|| "1".to_string())),
                     // #1276: cut by an intervention on its child
                     attr("cut", e.cut.then(|| "1".to_string())),
+                    // #1278: a closed path's bar, the legend entry
+                    attr("blocked", e.marks.blocked.then(|| "1".to_string())),
+                    attr("key", e.marks.key.clone()),
                 ],
                 label_attrs: vec![
                     attr("from", Some(a.id.clone())),
                     attr("to", Some(b.id.clone())),
                 ],
                 cut: e.cut,
+                // #1278: a path through it is closed
+                blocked: e.marks.blocked,
             }
         })
         .collect();
@@ -1956,12 +2188,25 @@ fn draw(d: &Diagram, p: &Placed, pw: u32, ph: u32, o: &RenderOptions) -> String 
                     .as_ref()
                     .and_then(|st| st.policy.as_ref())
                     .map(|p| (p.table(), t.color(0))),
-                // #1276: a hand on a node set by an intervention
-                icon: nd
+                // #1276: a hand on a node set by an intervention; #1278: X,
+                // Y, M on a causal diagram's treatment, outcome, mediator
+                icon: nd.states.as_ref().and_then(|st| {
+                    if st.intervened() {
+                        return Some(graph::NodeIcon::Hand);
+                    }
+                    match st.causal.as_deref()? {
+                        "treatment" => Some(graph::NodeIcon::Letter('X')),
+                        "outcome" => Some(graph::NodeIcon::Letter('Y')),
+                        "mediator" => Some(graph::NodeIcon::Letter('M')),
+                        _ => None,
+                    }
+                }),
+                // #1278: a ring around a node in the adjustment set
+                ring: nd
                     .states
                     .as_ref()
-                    .filter(|st| st.intervened())
-                    .map(|_| graph::NodeIcon::Hand),
+                    .filter(|st| st.causal.as_deref() == Some("adjust"))
+                    .map(|_| t.color(0)),
                 spark: (nd.spark.len() >= 2).then(|| {
                     (
                         nd.spark.clone(),
@@ -2141,6 +2386,9 @@ pub(crate) fn render(
     } else {
         4.0 + 14.0 * note_lines.len() as f64
     };
+    // #1278: the edge legend, rows of (swatch, key), above the note
+    let legend_rows = legend_rows(d, t, w);
+    let note_h = note_h + 18.0 * legend_rows.len() as f64;
     // the drawing's own canvas: whole px, so a data unit stays a pixel
     let (pw, ph) = (p.w.ceil().max(1.0), p.h.ceil().max(1.0));
     let (aw, ah) = ((w - 4.0).max(10.0), (h - 4.0 - note_h).max(10.0));
@@ -2165,6 +2413,34 @@ pub(crate) fn render(
     out.push_str(&draw(d, &p, pw as u32, ph as u32, o));
     out.push_str("</g>");
     let n = note_lines.len();
+    let below = if n == 0 { 0.0 } else { 4.0 + 14.0 * n as f64 };
+    let rows_n = legend_rows.len();
+    for (r, row) in legend_rows.iter().enumerate() {
+        let y = h - below - 18.0 * (rows_n - r) as f64 + 9.0;
+        let total: f64 = row.iter().map(|x| x.3).sum();
+        let mut x = (w - total) / 2.0;
+        out.push_str("<g class=\"dp-edge-legend\" aria-hidden=\"true\">");
+        for (label, colour, dashed, width) in row {
+            if let Some(c) = colour {
+                out.push_str(&format!(
+                    "<line x1=\"{:.1}\" y1=\"{y:.1}\" x2=\"{:.1}\" y2=\"{y:.1}\" stroke=\"{}\" stroke-width=\"2.4\"{}/>",
+                    x,
+                    x + 18.0,
+                    hex(*c),
+                    if *dashed { " stroke-dasharray=\"5,3\"" } else { "" }
+                ));
+            }
+            let tx = if colour.is_some() { x + 23.0 } else { x };
+            out.push_str(&format!(
+                "<text x=\"{tx:.1}\" y=\"{:.1}\" font-family=\"{font}\" font-size=\"11\" fill=\"{}\">{}</text>",
+                y + 3.8,
+                hex(if colour.is_some() { t.chart_label() } else { t.chart.note }),
+                esc(label)
+            ));
+            x += width;
+        }
+        out.push_str("</g>");
+    }
     for (k, line) in note_lines.iter().enumerate() {
         out.push_str(&format!(
             "<text x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\" font-family=\"{font}\" font-size=\"11\" fill=\"{}\">{}</text>",
@@ -2893,6 +3169,132 @@ mod tests {
     /// one (`was`), the node tinted by how far it moved, an intervention's
     /// hand and its cut incoming arcs, and what the evidence did as a line
     /// under the graph (and the screen-reader text).
+    /// #1278: a causal view — X / Y letters and a ring from the cards'
+    /// `causal`, edge colours, a blocked bar and the edge legend with its
+    /// caption; a twin network's story across the worlds.
+    #[test]
+    fn a_causal_view_rings_letters_blocked_edges_and_a_legend() {
+        let v = |x: &[&str]| x.iter().map(|y| s(y)).collect::<Vec<_>>();
+        let card = |extra: &str| {
+            s(&format!(
+                r#"{{"states": [{{"state": "yes", "p": 0.5}}, {{"state": "no", "p": 0.5}}]{extra}}}"#
+            ))
+        };
+        let cols = vec![
+            Column::new("id", Role::Diagram, v(&["z", "x", "y"])),
+            Column::new("l", Role::Label, v(&["Engaged", "Discount", "Renewed"])),
+            Column::new(
+                "b",
+                Role::Belief,
+                vec![
+                    card(r#", "causal": "adjust""#),
+                    card(r#", "causal": "treatment""#),
+                    card(r#", "causal": "outcome""#),
+                ],
+            ),
+            Column::new(
+                "e",
+                Role::Edges,
+                vec![
+                    s(
+                        r##"[{"from": "z", "to": "x", "style": "dashed", "key": "back-door path, blocked", "caption": "SHD 2"},
+                          {"from": "z", "to": "y", "style": "dashed", "blocked": true, "key": "back-door path, blocked"},
+                          {"from": "x", "to": "y", "color": "accent", "key": "causal path"},
+                          {"from": "y", "to": "x", "color": "#ff0000"}]"##,
+                    ),
+                    Value::Na,
+                    Value::Na,
+                ],
+            ),
+        ];
+        let d = Diagram::from_columns(&cols, &Locale::default()).unwrap();
+        assert!(d.edges[1].marks.blocked && !d.edges[0].marks.blocked);
+        assert_eq!(d.edges[2].marks.color, Some(EdgeColor::Slot(0)));
+        assert!(matches!(d.edges[3].marks.color, Some(EdgeColor::Level(_))));
+        assert_eq!(d.edge_caption.as_deref(), Some("SHD 2"));
+        let o = RenderOptions::default();
+        let svg = render_with(&cols, 700, 420, &o).unwrap();
+        roxmltree::Document::parse(&svg).expect("well-formed");
+        for want in [
+            "dp-node-ring",
+            ">X<",
+            ">Y<",
+            "dp-edge-block",
+            "data-blocked=\"1\"",
+            "dp-edge-legend",
+            ">back-door path, blocked<",
+            ">causal path<",
+            ">SHD 2<",
+            "stroke=\"#FF0000\"",
+        ] {
+            assert!(
+                svg.contains(want)
+                    || svg
+                        .to_ascii_uppercase()
+                        .contains(&want.to_ascii_uppercase()),
+                "{want}"
+            );
+        }
+        // one legend entry per key
+        assert_eq!(svg.matches(">back-door path, blocked<").count(), 1);
+        let accent = hex(o.theme.color(0));
+        assert!(
+            svg.contains(&format!("stroke=\"{accent}\"")),
+            "the causal path in the accent"
+        );
+    }
+
+    #[test]
+    fn a_twin_network_tells_what_the_change_did() {
+        let v = |x: &[&str]| x.iter().map(|y| s(y)).collect::<Vec<_>>();
+        let cols = vec![
+            Column::new("id", Role::Diagram, v(&["x", "y", "x*", "y*"])),
+            Column::new(
+                "l",
+                Role::Label,
+                v(&["Discount", "Renewed", "Discount", "Renewed"]),
+            ),
+            Column::new(
+                "b",
+                Role::Belief,
+                vec![
+                    s(
+                        r#"{"world": "factual", "states": [{"state": "yes", "p": 1.0}, {"state": "no", "p": 0.0}], "evidence": {"state": "yes"}}"#,
+                    ),
+                    s(
+                        r#"{"world": "factual", "states": [{"state": "yes", "p": 1.0}, {"state": "no", "p": 0.0}], "evidence": {"state": "yes"}}"#,
+                    ),
+                    s(
+                        r#"{"world": "counterfactual", "states": [{"state": "yes", "p": 0.0}, {"state": "no", "p": 1.0}], "evidence": {"state": "no", "mode": "do"}}"#,
+                    ),
+                    s(
+                        r#"{"world": "counterfactual", "states": [{"state": "yes", "p": 0.8}, {"state": "no", "p": 0.2}]}"#,
+                    ),
+                ],
+            ),
+            Column::new(
+                "lane",
+                Role::Lane,
+                v(&[
+                    "Factual world",
+                    "Factual world",
+                    "Counterfactual world",
+                    "Counterfactual world",
+                ]),
+            ),
+        ];
+        let d = Diagram::from_columns(&cols, &Locale::default()).unwrap();
+        assert_eq!(
+            twin_story(&d).as_deref(),
+            Some("If Discount had been set to no: Renewed yes 80% (as it happened 100%).")
+        );
+        let svg = render_with(&cols, 700, 420, &RenderOptions::default()).unwrap();
+        assert!(
+            svg.contains("If Discount had been set to no"),
+            "the line under the graph"
+        );
+    }
+
     #[test]
     fn a_bayes_net_shows_deltas_do_and_what_changed() {
         let v = |x: &[&str]| x.iter().map(|y| s(y)).collect::<Vec<_>>();
