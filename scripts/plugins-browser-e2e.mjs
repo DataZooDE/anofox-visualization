@@ -8,12 +8,16 @@
 //   (e) a plugin listed with {url, assets: true} gets its manifest's browser
 //       files loaded from modules/<name>/ (hello.js runs), and
 //   (f) one listed by its URL alone does not, though the files are there
-//       (#1290: the server lists the object only with --plugin-assets).
+//       (#1290: the server lists the object only with --plugin-assets),
+//   (g) with --serve <serve binary> (needs duckdb on PATH): `serve
+//       --dashboards --plugin … --plugin-assets` pages load hello.js and it
+//       runs; (h) without --plugin-assets they don't (#1294).
 //
 //   NODE_PATH=<dir with playwright>/node_modules node scripts/plugins-browser-e2e.mjs \
-//       --plugin hello_plugin.wasm [--web web] [--vendor web/vendor] [--port 8971]
+//       --plugin hello_plugin.wasm [--web web] [--vendor web/vendor] [--port 8971] [--serve target/debug/serve]
 import { createRequire } from "module";
 import { createServer } from "http";
+import { spawn } from "child_process";
 import { cpSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync } from "fs";
 import path from "path";
 import os from "os";
@@ -28,6 +32,7 @@ const plugin = arg("--plugin", "");
 const web = path.resolve(arg("--web", "web"));
 const vendor = path.resolve(arg("--vendor", path.join(web, "vendor")));
 const port = Number(arg("--port", "8971"));
+const serveBin = arg("--serve", "");
 if (!plugin || !existsSync(plugin) || !existsSync(path.join(web, "pkg"))) {
   console.error("usage: plugins-browser-e2e.mjs --plugin <hello_plugin.wasm> [--web web] (web/pkg built)");
   process.exit(2);
@@ -146,6 +151,39 @@ try {
     .then(() => true, () => false);
   check(said, "(d) without the plugin the dashboard says it needs the module");
   await page.close();
+  // (g)/(h) the locked --dashboards pages (server-rendered)
+  if (serveBin) {
+    const dash = path.join(W, "dash");
+    mkdirSync(dash, { recursive: true });
+    writeFileSync(path.join(dash, "hi.sql"), "-- @title Hi\nSELECT 'hello'::REQUIRES;\nSELECT 'Ada' AS who ::HELLO, 'Greeting'::TITLE;\n");
+    for (const [assets, p] of [[true, port + 3], [false, port + 4]]) {
+      const args = ["--dashboards", dash, "--plugin", plugin, "--port", String(p), "--no-open"];
+      if (assets) args.push("--plugin-assets");
+      const child = spawn(serveBin, args, { stdio: "ignore" });
+      try {
+        let up = false;
+        for (let i = 0; i < 100 && !up; i++) {
+          up = await fetch(`http://127.0.0.1:${p}/`).then((r) => r.ok, () => false);
+          if (!up) await new Promise((r) => setTimeout(r, 200));
+        }
+        const pg = await browser.newPage();
+        const asked = [];
+        pg.on("request", (r) => asked.push(new URL(r.url()).pathname));
+        await pg.goto(`http://127.0.0.1:${p}/d/hi`);
+        await pg.waitForSelector("figure", { timeout: 60000 });
+        const drew = /Hello, Ada!/.test(await pg.evaluate(() => document.body.textContent));
+        const ran = await pg
+          .waitForFunction(() => document.documentElement.dataset.helloPlugin === "loaded", null, { timeout: assets ? 30000 : 3000 })
+          .then(() => true, () => false);
+        const got = asked.includes("/modules/hello/hello.js");
+        if (assets) check(drew && got && ran, `(g) serve --dashboards --plugin-assets: the page loads and runs hello.js (${asked.filter((x) => x.startsWith("/modules/")).join(", ")})`);
+        else check(drew && !got && !ran, `(h) serve --dashboards without --plugin-assets: no browser files (${asked.filter((x) => x.startsWith("/modules/")).join(", ")})`);
+        await pg.close();
+      } finally {
+        child.kill(); // our own child, by handle
+      }
+    }
+  }
 } finally {
   await browser.close();
   s1.close();
