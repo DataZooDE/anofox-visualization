@@ -26,7 +26,7 @@ const errors = [];
 async function open(scheme) {
   const page = await browser.newPage({ viewport: { width: 1400, height: 1000 }, colorScheme: scheme });
   page.on("pageerror", (e) => errors.push(String(e)));
-  await page.goto(base + "?dashboard=which-lever-lowers-scrap");
+  await page.goto(base + "?dashboard=which-lever-lowers-scrap&tab=Ask%20the%20network");
   await page.waitForFunction(() => document.querySelector("svg[data-diagram] rect[data-node]"), null, { timeout: 120000 });
   await page.waitForTimeout(800);
   return page;
@@ -101,7 +101,7 @@ check(Math.round(pct(s.vals["scrap_rate.high"])) === 11, "do(senior) and do(main
 
 // #1334: Full size (⤢) enlarges the live panel, so a click there is evidence too
 await clickAt(await rowAt("maintenance", "on time"), { alt: true }); // retract it again
-const net = page.locator(".panel:has(svg[data-diagram])");
+const net = page.locator(".panel:has(svg[data-diagram])").first();
 await net.hover();
 await net.locator('button.dp-tool[title="Full size"]').click();
 await page.waitForTimeout(800);
@@ -120,6 +120,43 @@ if (shot) await page.screenshot({ path: `${shot}-full-light.png` });
 await page.keyboard.press("Escape");
 await page.waitForTimeout(600);
 check(!(await page.locator(".dp-panel-full, .dp-panel-full-back").count()), "Esc: back in the dashboard");
+
+// #1336: what to check first, recomputed after a click; the active paths
+const voiTitle = () => page.evaluate(() => [...document.querySelectorAll(".panel-title")].map((t) => t.textContent).find((t) => /What to check first/.test(t)) || "");
+await clickAt(await rowAt("operator", "senior"), { alt: true }); // retract do(senior)
+await clickAt(await rowAt("line_speed", "normal"), { alt: true }); // and do(normal)
+await page.waitForTimeout(800);
+check(/now: Line speed/.test(await voiTitle()), "no evidence: check the line speed first", await voiTitle());
+await clickAt(await rowAt("line_speed", "high"));
+await page.waitForTimeout(1500);
+check(/now: (?!Line speed)/.test(await voiTitle()), "line speed seen: something else is next", await voiTitle());
+check(await page.evaluate(() => (JSON.parse(document.querySelector("svg[data-bn-paths]")?.getAttribute("data-bn-paths") || "[]")).length > 0), "the active paths ride on the drawing");
+
+const tabText = async (tab) => {
+  await page.goto(base + "?dashboard=which-lever-lowers-scrap&tab=" + encodeURIComponent(tab));
+  await page.waitForTimeout(5000);
+  return page.evaluate(() => document.querySelector(".dash")?.innerText || "");
+};
+// seeing or doing: the operator's seen and done effects, then the material's
+let t = await tabText("Seeing or doing");
+check(t.includes("-3.9") && t.includes("-0.9"), "seeing or doing: the operator seen -3.9, done -0.9");
+check(await page.evaluate(() => !!document.querySelector("svg[data-diagram] .dp-bn-legend, svg[data-diagram]")), "seeing or doing: the causal drawing");
+await page.locator(".dash button", { hasText: /^Material$/ }).click();
+await page.waitForTimeout(3000);
+t = await page.evaluate(() => document.querySelector(".dash")?.innerText || "");
+check(/-3\.3[\s\S]*-3\.3/.test(t), "seeing or doing: the material, seen = done", t.slice(0, 200));
+// best plan: the cheapest plan under 10 %, then with a dearer slow line
+t = await tabText("Best plan");
+check(/normal line speed\s*THE PLAN/i.test(t), "best plan: a normal line speed", t.slice(0, 400));
+const speed = page.locator(".dash input:visible").nth(1);
+await speed.fill("30");
+await speed.press("Enter");
+await page.waitForTimeout(4000);
+t = await page.evaluate(() => document.querySelector(".dash")?.innerText || "");
+check(/maintenance on time \+ inspect incoming material\s*THE PLAN/i.test(t), "best plan: with a dearer slow line, maintenance and inspection", t.slice(0, 400));
+// how the graph was found: one arc off the plant's graph
+await tabText("How the graph was found");
+check((await page.evaluate(() => document.querySelector("svg[data-bn-shd]")?.getAttribute("data-bn-shd"))) === "1", "the learned graph: structural Hamming distance 1");
 
 if (shot) {
   const dark = await open("dark");
