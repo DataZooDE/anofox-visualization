@@ -105,6 +105,7 @@ export default defineConfig({
           { label: "A static website", slug: "deploy/static-site", badge: { text: "CLI", variant: "note" } },
           { label: "Authoring on your data", slug: "deploy/authoring", badge: { text: "Full toolkit", variant: "note" } },
           { label: "The locked server", slug: "deploy/locked-server", badge: { text: "Locked server", variant: "tip" } },
+          { label: "A walkthrough (video)", slug: "deploy/walkthrough", badge: { text: "Locked server", variant: "tip" } },
           { label: "Login and row policies", slug: "deploy/security", badge: { text: "Locked server", variant: "tip" } },
           { label: "Embedding in your app", slug: "deploy/embedding", badge: { text: "Locked server", variant: "tip" } },
           { label: "Agents and MCP", slug: "deploy/agent", badge: { text: "Locked server", variant: "tip" } },
