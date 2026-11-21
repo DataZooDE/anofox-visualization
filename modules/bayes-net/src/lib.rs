@@ -83,7 +83,7 @@ canonical | front-door) marks the treatment X, the outcome Y, the first set's no
 M, the back-door paths dashed (red when open, a bar where the set blocks them), the causal paths in the accent \
 colour; beliefs with a world column (factual | counterfactual) draw the twin network, the nodes a do reaches twice \
 (the copy's id ends in *), the rest shared; reference := a LIST of (from, to) draws the learned arcs (strength at or \
-above threshold) against it: matching, extra, reversed, missing dashed, and the structural Hamming distance. Lint: \
+above threshold, or required) against it: matching, extra, reversed, missing dashed, and the structural Hamming distance. Lint: \
 cycles, unknown ids, beliefs not summing to 1, unknown states, bad modes or likelihoods, path steps along no arc or \
 out of order, policy options, parent_states and chosen options that do not fit, adjustment sets that leave a \
 back-door path open or hold a node downstream of the treatment. \
