@@ -156,7 +156,7 @@ SELECT cost ::XAXIS, mi AS "question" ::SCATTER, CASE WHEN efficient THEN mi END
        'Which question to ask next'::TITLE
 FROM v ORDER BY cost;
 
--- @tile A Bayesian network | `anofox_plot_bayes_net` draws a Bayesian network from an engine's tables — a bar per state, the prior faint behind it, the observed node shaded. Hover a node for its probability table.
+-- @tile A Bayesian network | `anofox_plot_bayes_net` draws a Bayesian network from an engine's tables — a bar per state, the prior faint behind it, the observed node shaded. Hover a node for its beliefs; Rain, whose table the query passes, also shows its probability table.
 SELECT 'bayes-net'::REQUIRES;
 SELECT 12::COL;
 CREATE TABLE bn_nodes AS
@@ -179,25 +179,54 @@ SELECT anofox_plot_bayes_net(n,
        AS "The grass is wet: did it rain?"
 FROM bn_nodes n;
 
--- @tile Seeing or doing | Click a state to observe it (`'ev evidence'::SELECT_AS`) and the query recomputes the beliefs; the chip switches it to do(). Turning the sprinkler on yourself cuts its arc from the clouds (the hand), so Cloudy is back at 50 %, and each bar shows how far that click moved it.
+-- @tile Seeing or doing | Click a state to observe it (`'ev evidence'::SELECT_AS`) and the query recomputes the beliefs; alt-click or the chip switches it to do(). Turning the sprinkler on yourself cuts its arc from the clouds (the hand), so Cloudy is back at 50 %, and each bar shows how far that click moved it. | click: .dash svg [data-of="sprinkler"] text[data-state="yes"] | alt-click: .dash svg [data-of="sprinkler"] text[data-state="yes"]
 SELECT 'bayes-net'::REQUIRES;
 SELECT 12::COL;
-CREATE TABLE bn_do_nodes AS
+CREATE TABLE sd_nodes AS
 SELECT * FROM (VALUES ('cloudy', 'Cloudy'), ('sprinkler', 'Sprinkler on'), ('rain', 'Rain'), ('grass', 'Wet grass')) t(id, label),
               (SELECT 'chance' AS kind, ['yes', 'no'] AS states);
--- the beliefs with the sprinkler set on, do(), and before: seen on
-CREATE TABLE bn_do_beliefs AS
-SELECT node, s.state, CASE s.state WHEN 'yes' THEN p ELSE 1 - p END AS probability,
-       CASE s.state WHEN 'yes' THEN q ELSE 1 - q END AS prior, CASE s.state WHEN 'yes' THEN w ELSE 1 - w END AS previous
-FROM (VALUES ('cloudy', 0.5, 0.5, 0.1667), ('sprinkler', 1.0, 0.3, 1.0), ('rain', 0.5, 0.5, 0.3), ('grass', 0.945, 0.6471, 0.927)) t(node, p, q, w),
+-- each node's table: P(state | its parents' states)
+CREATE TABLE sd_tables AS
+SELECT node, parent_states, s.state, CASE s.state WHEN 'yes' THEN p ELSE 1 - p END AS probability
+FROM (VALUES ('cloudy', []::VARCHAR[], 0.5), ('sprinkler', ['yes'], 0.1), ('sprinkler', ['no'], 0.5),
+             ('rain', ['yes'], 0.8), ('rain', ['no'], 0.2), ('grass', ['yes', 'yes'], 0.99),
+             ('grass', ['yes', 'no'], 0.9), ('grass', ['no', 'yes'], 0.9), ('grass', ['no', 'no'], 0.0)) t(node, parent_states, p),
      (VALUES ('yes'), ('no')) s(state);
+-- every case of the network (2^4), a row per node with its factor
+CREATE TABLE sd_cases AS
+SELECT k, node, state, probability AS f
+FROM (SELECT c || s || r || g AS k, unnest(['cloudy', 'sprinkler', 'rain', 'grass']) AS node, unnest([c, s, r, g]) AS state,
+             unnest([[], [c], [c], [s, r]]) AS parent_states
+      FROM (VALUES ('yes'), ('no')) t1(c), (VALUES ('yes'), ('no')) t2(s), (VALUES ('yes'), ('no')) t3(r), (VALUES ('yes'), ('no')) t4(g))
+JOIN sd_tables USING (node, parent_states, state);
+SELECT 'ev evidence'::SELECT_AS;
+-- the evidence now, before the last click, and none (the prior)
+WITH v AS (SELECT * FROM (VALUES ('now', getvariable('ev')), ('before', getvariable('ev_prev')), ('prior', '[]')) v(which, j)),
+ev AS (
+  SELECT which, unnest(from_json(coalesce(nullif(j, ''), '[]'),
+           '[{"node": "VARCHAR", "state": "VARCHAR", "likelihood": "DOUBLE", "mode": "VARCHAR"}]')) AS e FROM v),
+-- a case weighs the product of its factors; evidence keeps its state's cases, do() also drops the node's own factor
+w AS (
+  SELECT v.which, c.k, product(CASE WHEN o.is_do THEN 1 ELSE c.f END * CASE WHEN o.node IS NULL THEN 1 ELSE coalesce(l.lik, 0) END) AS w
+  FROM sd_cases c CROSS JOIN v
+  LEFT JOIN (SELECT which, e.node, bool_or(e.mode = 'do') AS is_do FROM ev GROUP BY ALL) o ON o.which = v.which AND o.node = c.node
+  LEFT JOIN (SELECT which, e.node, e.state, sum(coalesce(e.likelihood, 1)) AS lik FROM ev GROUP BY ALL) l ON l.which = v.which AND l.node = c.node AND l.state = c.state
+  GROUP BY ALL),
+m AS (
+  SELECT w.which, c.node, c.state, sum(w.w) / nullif(sum(sum(w.w)) OVER (PARTITION BY w.which, c.node), 0) AS p
+  FROM w JOIN sd_cases c USING (k) GROUP BY w.which, c.node, c.state),
+b AS (
+  SELECT node, state, any_value(p) FILTER (which = 'now') AS probability, any_value(p) FILTER (which = 'prior') AS prior,
+         any_value(p) FILTER (which = 'before') AS previous
+  FROM m GROUP BY ALL)
 SELECT anofox_plot_bayes_net(n,
          arcs := [{'from': 'cloudy', 'to': 'sprinkler'}, {'from': 'cloudy', 'to': 'rain'},
                   {'from': 'sprinkler', 'to': 'grass'}, {'from': 'rain', 'to': 'grass'}],
-         beliefs := (SELECT list(b) FROM bn_do_beliefs b),
-         evidence := [{'node': 'sprinkler', 'state': 'yes', 'mode': 'do'}])
+         beliefs := (SELECT list(b) FROM b),
+         evidence := (SELECT list(e) FROM ev WHERE which = 'now'),
+         tables := (SELECT list(t) FROM sd_tables t))
        AS "Turning the sprinkler on: the clouds stay at 50 %"
-FROM bn_do_nodes n;
+FROM sd_nodes n;
 
 -- @tile A decision's policy | An influence diagram: `policy :=` draws each decision's policy as a table in its box — a row per thing known when deciding, a column per option with its expected payoff, the best one marked. Arcs into a decision are dotted (what is known), the payoff's expected value sits in its diamond.
 SELECT 'bayes-net'::REQUIRES;
@@ -238,21 +267,22 @@ SELECT anofox_plot_bayes_net(n,
        AS "From the discount to renewal: adjust for engagement"
 FROM cz_tile_nodes n;
 
--- @tile Did a learner find it | `reference :=` compares a learned network with the true or expert one: matching arcs grey, a reversed one in the accent colour, an extra one amber, a missed one dashed red; the legend counts them and ends with the structural Hamming distance. Drive `threshold :=` with a slider.
+-- @tile Did a learner find it | `reference :=` compares a learned network with the true or expert one: matching arcs grey, a reversed one in the accent colour, an extra one amber, a missed one dashed red; the legend counts them and ends with the structural Hamming distance. A number input drives `threshold :=`: arcs found less often are left out.
 SELECT 'bayes-net'::REQUIRES;
 SELECT 12::COL;
+SELECT 50 AS min_strength ::NUMBER, 'Least arc strength (%)'::LABEL;
 SELECT anofox_plot_bayes_net(n,
          arcs := [{'from': 'size', 'to': 'engaged', 'strength': 0.97}, {'from': 'engaged', 'to': 'discount', 'strength': 0.94},
                   {'from': 'stay', 'to': 'usage', 'strength': 0.66}, {'from': 'price', 'to': 'usage', 'strength': 0.55},
                   {'from': 'discount', 'to': 'stay', 'strength': 0.31}],
          reference := [{'from': 'size', 'to': 'engaged'}, {'from': 'engaged', 'to': 'discount'},
                        {'from': 'usage', 'to': 'stay'}, {'from': 'discount', 'to': 'stay'}],
-         threshold := 0.5)
+         threshold := getvariable('min_strength') / 100)
        AS "Learned against the true network"
 FROM (VALUES ('size', 'Large account'), ('engaged', 'Engaged'), ('discount', 'Got the discount'),
              ('price', 'Price rose'), ('usage', 'Uses it weekly'), ('stay', 'Renewed')) n(id, label);
 
--- @tile Clarifying a learned graph | An arc the data can't orient (`status` `'undirected'`) has no arrowheads and takes the colour of the bootstrap's lean; one an expert's answer set (`'expert'`) carries a ✓ badge with who, and who, when and why on hover. Experts answer through a `::FORM` and `::SAVE` into an `answers` table.
+-- @tile Clarifying a learned graph | An arc the data can't orient (`status` `'undirected'`) has no arrowheads and takes the colour of the bootstrap's lean; one an expert's answer set (`'expert'`) carries a ✓ badge with who, and who, when and why on hover. Here the statuses are typed in; in a served dashboard experts answer through a `::FORM` and `::SAVE` into an `answers` table.
 SELECT 'bayes-net'::REQUIRES;
 SELECT 12::COL;
 CREATE TABLE cg_nodes AS
