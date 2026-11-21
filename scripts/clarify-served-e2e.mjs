@@ -14,7 +14,10 @@
 //   (false / null / blank over a stored true: 403, it stays true), may
 //   resend the stored value or leave the column out;
 // - an approver ticks it and saves; the row says so;
-// - an approver who isn't a writer can't save at all.
+// - an approver who isn't a writer can't save at all;
+// - #1326: under an access policy that masks the column for non-approvers
+//   (they read NULL where a true is stored), a non-approver still can't
+//   overwrite it with an unset value: refused, it stays true.
 //
 //   NODE_PATH=<dir with playwright>/node_modules node scripts/clarify-served-e2e.mjs \
 //       --ext path/to/anofox_visualization.duckdb_extension [--port 8979] [--duckdb duckdb] [--shots dir]
@@ -31,7 +34,7 @@ const arg = (k, d) => {
   return i > 0 ? process.argv[i + 1] : d;
 };
 const ext = arg("--ext", "");
-const port = Number(arg("--port", "8979"));
+let port = Number(arg("--port", "8979"));
 const duckdb = arg("--duckdb", "duckdb");
 const shots = arg("--shots", "");
 if (!ext || !existsSync(ext)) {
@@ -92,12 +95,12 @@ CREATE TABLE answers (id VARCHAR, answer VARCHAR, rationale VARCHAR, who VARCHAR
 -- dr-a's earlier answer, settled back when dr-a was an approver
 INSERT INTO answers VALUES ('smoke|bronc', 'b_to_a', 'Our clinic', 'dr-a', '2026-11-01T09:00:00Z', true);`;
 
-async function serve() {
+async function serve(o = opts) {
   const p = spawn(duckdb, ["-unsigned", "-batch", ":memory:"], { stdio: ["pipe", "pipe", "pipe"], env });
   let log = "";
   p.stdout.on("data", (d) => (log += d));
   p.stderr.on("data", (d) => (log += d));
-  p.stdin.write(`LOAD ${sqlStr(ext)};\n${SETUP}\nSELECT anofox_serve_dashboards(${sqlStr(dashDir)}, ${port}, ${sqlStr(JSON.stringify(opts))});\n`);
+  p.stdin.write(`LOAD ${sqlStr(ext)};\n${SETUP}\nSELECT anofox_serve_dashboards(${sqlStr(dashDir)}, ${port}, ${sqlStr(JSON.stringify(o))});\n`);
   for (let i = 0; i < 100; i++) {
     try {
       if ((await fetch(`http://127.0.0.1:${port}/healthz`)).ok) return { proc: p, log: () => log };
@@ -258,6 +261,39 @@ try {
     res = await post(c.page, { ...body, id: "e001", form: { answer: "a_to_b", decides: true } });
     check(res.status === 403 && /may not save/.test(res.text) && records().length === 6, `(e) …a direct POST is 403 (${res.status} ${res.text})`);
     await c.ctx.close();
+  }
+
+  // (f) #1326: the same server under an access policy that nulls `decides`
+  // for everyone but the approvers. dr-a now reads NULL on the settled base
+  // row; sending any value for it (unset ones too) is still refused and the
+  // stored true stays; a save that leaves it out goes through.
+  srv.proc.stdin.end();
+  srv.proc.kill(); // our own child (pid known), never by name
+  srv = null;
+  port += 1; // a fresh port: no wait on the old socket
+  const polPath = path.join(W, "policy.json");
+  writeFileSync(
+    polPath,
+    JSON.stringify({ tables: { qs: { rows: true }, answers: { rows: true, columns: { decides: { allow_users: ["dr-b", "carol"], else: "null" } } } } })
+  );
+  srv = await serve({ ...opts, policy: polPath });
+  {
+    const n0 = records().length;
+    const f = await openAs("dr-a");
+    const masked = await until(f.page, /smoke\|bronc:dr-a=b_to_a/);
+    check(/smoke\|bronc:dr-a=b_to_a(,|$)/.test(masked), `(f) under the policy dr-a reads the settled row as unset (${masked})`);
+    for (const [id, v] of [["f001", false], ["f002", null], ["f003", "false"]]) {
+      res = await post(f.page, { ...bronc, base: n0 + 10, id, form: { answer: "b_to_a", decides: v } });
+      check(res.status === 403 && records().length === n0, `(f) dr-a's ${JSON.stringify(v)} over the masked true is refused, nothing written (${res.status} ${res.text})`);
+    }
+    res = await post(f.page, { ...bronc, base: n0 + 10, id: "f004", form: { rationale: "Under the policy" } });
+    check(res.status === 201 && records().length === n0 + 1, `(f) …a save without it goes through (${res.status} ${res.text})`);
+    check(f.errs.length === 0, `(f) no page errors${f.errs.length ? ": " + f.errs.join("; ") : ""}`);
+    await f.ctx.close();
+    const g = await openAs("dr-b");
+    const seen = await until(g.page, /smoke\|bronc:dr-a=b_to_a!/);
+    check(/smoke\|bronc:dr-a=b_to_a!/.test(seen), `(f) the approver still reads it settled (${seen})`);
+    await g.ctx.close();
   }
 } finally {
   if (srv) {

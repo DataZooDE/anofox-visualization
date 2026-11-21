@@ -391,11 +391,31 @@ fn approver_value(v: Option<&Value>) -> Option<String> {
     match v? {
         Value::Null | Value::Bool(false) => None,
         Value::Bool(true) => Some("true".into()),
-        Value::Number(n) => n.as_f64().filter(|x| *x != 0.0).map(|x| x.to_string()),
+        Value::Number(n) => number_value(n),
         Value::String(s) if s.trim().is_empty() => None,
         Value::String(s) => Some(s.clone()),
         other => Some(other.to_string()),
     }
+}
+
+/// A number as [`approver_value`] compares it (#1326): integers exactly
+/// (two BIGINTs above 2^53 that a float would round together stay apart),
+/// an integral float as that integer (a DOUBLE column's `1.0` is a sent
+/// `1`), other floats by their shortest text; zero is "unset".
+fn number_value(n: &serde_json::Number) -> Option<String> {
+    if let Some(i) = n.as_i64() {
+        return (i != 0).then(|| i.to_string());
+    }
+    if let Some(u) = n.as_u64() {
+        return (u != 0).then(|| u.to_string());
+    }
+    let x = n.as_f64().filter(|x| x.is_finite() && *x != 0.0)?;
+    // below 2^63 an integral float is that i64 exactly
+    Some(if x.fract() == 0.0 && x.abs() < 9.223_372_036_854_775e18 {
+        (x as i64).to_string()
+    } else {
+        x.to_string()
+    })
 }
 
 /// The first `approver_only` column a writer who isn't an approver would
@@ -1555,6 +1575,19 @@ mod tests {
         let mut only_answer = row(json!({"decides": true}));
         only_answer.remove("decides");
         assert_eq!(approver_only_changed(d, &only_answer, Some(&settled)), None);
+        // #1326: numbers compare exactly — two BIGINTs a float rounds
+        // together differ, an integral float is its integer, 0 is unset
+        let v = |x: Value| approver_value(Some(&x));
+        assert_ne!(
+            v(json!(9_007_199_254_740_993_i64)),
+            v(json!(9_007_199_254_740_992_i64))
+        );
+        assert_ne!(v(json!(u64::MAX)), v(json!(u64::MAX - 1)));
+        assert_eq!(v(json!(3)), v(json!(3.0)));
+        assert_eq!(v(json!(-2)), v(json!(-2.0)));
+        assert_ne!(v(json!(2.5)), v(json!(2)));
+        assert_eq!(v(json!(0.0)), None);
+        assert_eq!(v(json!(0)), None);
         // the config's refusals
         let err = |extra: Value, table: Value| cfg(extra, table).unwrap_err();
         assert!(err(json!({}), table.clone()).contains("approvers must say who"));
