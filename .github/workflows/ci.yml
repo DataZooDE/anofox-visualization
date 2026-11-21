@@ -938,6 +938,13 @@ jobs:
         timeout-minutes: 5
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/bayes-net-e2e.mjs --url http://127.0.0.1:8947/
 
+      # scripts/bayes-production-e2e.mjs (#1331): beliefs looked up from
+      # precomputed answers by the clicks' key — seeing vs doing on a lever,
+      # a node that is not a lever ignores clicks. Reuses the :8947 server.
+      - name: Bayesian network lookup e2e (#1331)
+        timeout-minutes: 5
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/bayes-production-e2e.mjs --url http://127.0.0.1:8947/
+
       # scripts/bayes-decisions-e2e.mjs (#1279): decision views — a
       # decision's policy in its box, a click decides; a troubleshooting plan
       # that re-plans after each answer; the evidence search. Reuses the

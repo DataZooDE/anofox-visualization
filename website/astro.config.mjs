@@ -82,6 +82,9 @@ export default defineConfig({
             { label: "anofox-decide", slug: "gallery/decide" },
           ] },
         ] },
+        { label: "Use cases", items: [
+          { label: "Which lever lowers scrap?", slug: "use-cases/production-scrap" },
+        ] },
         { label: "Build", items: [
           { label: "The annotation model", slug: "build" },
           { label: "Charts", collapsed: true, items: [{ autogenerate: { directory: "build/charts" } }] },

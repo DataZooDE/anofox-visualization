@@ -1,0 +1,86 @@
+---
+title: "Which lever lowers scrap?"
+description: "Six months of lot records from a turning shop. The charts say senior operators halve scrap; a Bayesian network says what each lever would really do — checked against the plant's truth."
+---
+
+import shotL from "../../../assets/showcase/which-lever-lowers-scrap-light.webp";
+import shotD from "../../../assets/showcase/which-lever-lowers-scrap-dark.webp";
+
+A turning shop (two lines of four CNC lathes, day and night shifts) scraps too many parts. One lot in six has more than 3 % scrap, and a sixth of the deliveries are at risk. The plant manager has a budget for one fix. **Which lever is worth paying for?**
+
+<figure class="doc-shot">
+  <img class="lp-light" src={shotL.src} alt="A Bayesian network of the turning shop: the operator is set to senior with do(), the arc from Shift is cut, high scrap moves from 17 % to 16 %" />
+  <img class="lp-dark" src={shotD.src} alt="" />
+  <figcaption>do(operator = senior): the arc from Shift is cut, high scrap moves by one point. <a href="../../app/?dashboard=which-lever-lowers-scrap">Open it and click ↗</a></figcaption>
+</figure>
+
+## What the charts say
+
+The MES has logged 9,984 lots of 400 parts over 26 weeks: shift, operator, supplier, line speed, hours since maintenance, tool wear, spindle temperature, and the parts out of tolerance. Break scrap down by any factor and there is a gap:
+
+- night lots have twice the high-scrap lots of day lots;
+- overdue machines have three times as many as those maintained on time;
+- lots of **senior operators** have 12 % high scrap, juniors 22 %.
+
+The obvious answer is to put seniors on the night shift, and it's the expensive one. But the factors move together. The day crew is mostly senior. Nights run the line faster to catch up. The maintenance crew works days, so machines on nights wait longer. A chart of one factor shows every factor that rides along with it, so it can't tell you which gap you'd get if you paid for it.
+
+## What the network says
+
+A Bayesian network learned from the same lot records separates **seeing** from **doing**:
+
+| | high scrap |
+|---|---|
+| no evidence | 17 % |
+| *seeing* a senior operator on the lot | 13 % |
+| *making* the operator senior, do(operator = senior) | 16 % |
+| do(maintenance on time) | 12 % |
+| do(line speed normal) | 8 % |
+
+Seeing a senior operator mostly tells you it's a day lot: the network says *day* is 80 % likely, and overdue maintenance less likely. Setting the operator with do() cuts the arc from *Shift*, which stays 50/50, and buys about one point. Maintenance on time and a normal line speed are the levers.
+
+In the dashboard you click a lever's state to observe it, Alt-click (or the chip) to set it, and combine as many as you like. Only the six levers can be clicked; the machine, the defects and the result only react.
+
+## Is it right?
+
+The plant is simulated, so its truth is known: forcing each lever on 400,000 simulated lots says what it really does. The network was learned from the 9,984 lots alone, plus the process order and one arc a planner knows (a faster line ships earlier).
+
+| Lever (high scrap, points) | seen (network) | done (network) | done (true) |
+|---|---|---|---|
+| normal line speed | −9.7 | −9.2 | −8.4 |
+| maintenance on time | −5.5 | −4.9 | −6.1 |
+| day shift | −5.7 | −5.7 | −5.9 |
+| good material | −3.3 | −3.3 | −3.8 |
+| supplier A | −1.4 | −1.4 | −1.9 |
+| senior operator | −3.9 | **−0.9** | **−1.4** |
+
+The network ranks the levers as the plant does, and it sees that *senior operator* mostly stands in for the shift. It underestimates maintenance a little. A second draw of the plant, learned the same way and checked once, gave the same ranking.
+
+## How it's built
+
+The network was learned and solved by an inference engine outside the dashboard. The page gets only its **answers**, as Parquet files: the belief of every node and state for each combination of evidence on the six levers (each one unset, observed or set; 21,875 combinations, 380 KB), the learned arcs with their bootstrap strength, and the aggregates the charts show. No probability tables are published, so the drawing has no table on hover.
+
+The dashboard turns the clicks into a key and looks the beliefs up:
+
+```sql
+SELECT 'bayes-net'::REQUIRES;
+
+-- the levers: their states, and their place in the key
+CREATE TEMP TABLE levers AS FROM (VALUES
+  ('line_speed', ['high', 'normal'], 1), ('maintenance', ['on time', 'overdue'], 5), …
+) t(node, states, mult);
+
+-- the key: per lever 0 (unset), 1..k (observed) or k+1..2k (set with do())
+CREATE TEMP VIEW keys AS
+SELECT coalesce(sum((list_position(l.states, e.state)
+         + CASE WHEN e.mode = 'do' THEN len(l.states) ELSE 0 END) * l.mult), 0) AS key
+FROM evidence e JOIN levers l USING (node);      -- evidence: getvariable('ev') as rows
+
+SELECT 'ev evidence'::SELECT_AS;
+SELECT anofox_plot_bayes_net(n,
+         arcs := (SELECT list(a) FROM arcs a),
+         beliefs := (SELECT list(b) FROM beliefs b),   -- looked up by the key
+         evidence := (SELECT list(e) FROM evidence e))
+FROM nodes n;                                    -- the non-levers: settable = false
+```
+
+A node row with `settable` `false` ignores clicks, so a reader can only ask what the file can answer. The full dashboard is the example *Which lever lowers scrap?* in the [online demo](../../app/?dashboard=which-lever-lowers-scrap); [interactive evidence](../../gallery/features/) explains the clicks.
