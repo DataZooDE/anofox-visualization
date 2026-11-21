@@ -10,6 +10,9 @@
 // - a writer who isn't an approver sees "settle the disagreement" disabled,
 //   saying why, and a direct POST setting it is refused (403), nothing
 //   written; leaving it unticked saves;
+// - the stored row decides: a non-approver can't unsettle a settled row
+//   (false / null / blank over a stored true: 403, it stays true), may
+//   resend the stored value or leave the column out;
 // - an approver ticks it and saves; the row says so;
 // - an approver who isn't a writer can't save at all.
 //
@@ -60,7 +63,7 @@ FROM (
   UNION ALL SELECT 3, 'decides', 'toggle', 'false', NULL, NULL, 'Settle the disagreement', 'As the approver: this answer decides the question'
 ) ORDER BY ord;
 SELECT 'Submit answer' ::SAVE, 'ans' ::SAVE_FORM, 'answers' ::SAVE_TABLES, 'q' ::SAVE_KEY;
-SELECT string_agg(who || '=' || answer || CASE WHEN decides THEN '!' ELSE '' END, ',' ORDER BY who) AS a ::TEXT_SMALL FROM answers;
+SELECT string_agg(id || ':' || who || '=' || answer || CASE WHEN decides THEN '!' ELSE '' END, ',' ORDER BY id, who) AS a ::TEXT_SMALL FROM answers;
 `
 );
 const sec = crypto.randomBytes(24).toString("hex");
@@ -85,7 +88,9 @@ const opts = {
   },
 };
 const SETUP = `CREATE TABLE qs AS SELECT * FROM (VALUES ('smoke|lung', 'Does smoking lead to lung cancer?')) v(q, text);
-CREATE TABLE answers (id VARCHAR, answer VARCHAR, rationale VARCHAR, who VARCHAR, "when" VARCHAR, decides BOOLEAN);`;
+CREATE TABLE answers (id VARCHAR, answer VARCHAR, rationale VARCHAR, who VARCHAR, "when" VARCHAR, decides BOOLEAN);
+-- dr-a's earlier answer, settled back when dr-a was an approver
+INSERT INTO answers VALUES ('smoke|bronc', 'b_to_a', 'Our clinic', 'dr-a', '2026-11-01T09:00:00Z', true);`;
 
 async function serve() {
   const p = spawn(duckdb, ["-unsigned", "-batch", ":memory:"], { stdio: ["pipe", "pipe", "pipe"], env });
@@ -178,7 +183,7 @@ try {
     rowOf(r[0])?.who === "dr-a" && rowOf(r[0])?.id === "smoke|lung" && rowOf(r[0])?.answer === "a_to_b" && rowOf(r[0])?.decides === false && serverTime(rowOf(r[0])),
     `(a) the row: who is the login, when the server's clock (${JSON.stringify(rowOf(r[0]))})`
   );
-  check(/dr-a=a_to_b/.test(await until(a.page, /dr-a=a_to_b/)), `(a) the page shows the answer (${await shown(a.page)})`);
+  check(/smoke\|lung:dr-a=a_to_b/.test(await until(a.page, /smoke\|lung:dr-a=a_to_b/)), `(a) the page shows the answer (${await shown(a.page)})`);
 
   // (b) the stamp can't be forged: a direct POST naming someone else, long ago.
   const base = records().length + 10;
@@ -192,12 +197,27 @@ try {
   for (const [id, v] of [["c001", true], ["c002", "true"]]) {
     res = await post(a.page, { ...body, id, form: { answer: "b_to_a", decides: v } });
     check(
-      res.status === 403 && /only approvers may set answers\.decides/.test(res.text) && records().length === 2,
+      res.status === 403 && /only approvers may change answers\.decides/.test(res.text) && records().length === 2,
       `(c) a non-approver's settle (${JSON.stringify(v)}) is refused, nothing written (${res.status} ${res.text})`
     );
   }
   res = await post(a.page, { ...body, id: "c003", form: { answer: "b_to_a", decides: false } });
   check(res.status === 201 && records().length === 3, `(c) …unticked it saves (${res.status} ${res.text})`);
+  // (c2) the stored row decides, not the request: dr-a can't unsettle the
+  // settled base row, can resend its value, and can save without it.
+  const bronc = { ...body, key: "smoke|bronc", vars: { q: "smoke|bronc" } };
+  for (const [id, v] of [["c101", false], ["c102", null], ["c103", "false"]]) {
+    res = await post(a.page, { ...bronc, id, form: { answer: "a_to_b", decides: v } });
+    check(
+      res.status === 403 && /only approvers may change answers\.decides/.test(res.text) && records().length === 3,
+      `(c2) a non-approver's ${JSON.stringify(v)} over a settled true is refused, nothing written (${res.status} ${res.text})`
+    );
+  }
+  res = await post(a.page, { ...bronc, id: "c104", form: { answer: "b_to_a", decides: true } });
+  check(res.status === 201 && records().length === 4, `(c2) …resending the stored true saves (${res.status} ${res.text})`);
+  res = await post(a.page, { ...bronc, id: "c105", form: { rationale: "Still our clinic" } });
+  check(res.status === 201 && records().length === 5, `(c2) …and a save without the column saves (${res.status} ${res.text})`);
+  check(/smoke\|bronc:dr-a=b_to_a!/.test(await until(a.page, /smoke\|bronc:dr-a=b_to_a!/)), `(c2) the stored value stays true (${await shown(a.page)})`);
   check(a.errs.length === 0, `(a–c) no page errors${a.errs.length ? ": " + a.errs.join("; ") : ""}`);
 
   // (d) dr-b, a writer and an approver: settles from the page.
@@ -209,13 +229,13 @@ try {
   await settle(b.page);
   t = await save(b.page);
   r = records();
-  check(/Saved at/.test(t) && r.length === 4, `(d) dr-b settles: saved (${t})`);
+  check(/Saved at/.test(t) && r.length === 6, `(d) dr-b settles: saved (${t})`);
   check(
-    rowOf(r[3])?.who === "dr-b" && rowOf(r[3])?.decides === true && rowOf(r[3])?.answer === "b_to_a" && serverTime(rowOf(r[3])),
-    `(d) the row: dr-b, settled, the server's time (${JSON.stringify(rowOf(r[3]))})`
+    rowOf(r[5])?.who === "dr-b" && rowOf(r[5])?.decides === true && rowOf(r[5])?.answer === "b_to_a" && serverTime(rowOf(r[5])),
+    `(d) the row: dr-b, settled, the server's time (${JSON.stringify(rowOf(r[5]))})`
   );
-  const both = await until(b.page, /dr-a=b_to_a,dr-b=b_to_a!/);
-  check(both === "dr-a=b_to_a,dr-b=b_to_a!", `(d) two experts, two rows of one question (${both})`);
+  const both = await until(b.page, /smoke\|lung:dr-a=b_to_a,smoke\|lung:dr-b=b_to_a!/);
+  check(/smoke\|lung:dr-a=b_to_a,smoke\|lung:dr-b=b_to_a!$/.test(both), `(d) two experts, two rows of one question (${both})`);
   check(b.errs.length === 0, `(d) no page errors${b.errs.length ? ": " + b.errs.join("; ") : ""}`);
   if (shots) {
     mkdirSync(shots, { recursive: true });
@@ -236,7 +256,7 @@ try {
     const c = await openAs("carol");
     check(await c.page.locator('.save-panel .submit-btn:text-is("Submit answer")').isDisabled(), "(e) an approver who isn't a writer can't save");
     res = await post(c.page, { ...body, id: "e001", form: { answer: "a_to_b", decides: true } });
-    check(res.status === 403 && /may not save/.test(res.text) && records().length === 4, `(e) …a direct POST is 403 (${res.status} ${res.text})`);
+    check(res.status === 403 && /may not save/.test(res.text) && records().length === 6, `(e) …a direct POST is 403 (${res.status} ${res.text})`);
     await c.ctx.close();
   }
 } finally {
