@@ -751,7 +751,12 @@ fn diff(options: &Row) -> Result<Vec<(String, String, &'static str)>, String> {
     let learned: Vec<(String, String)> = list(options, "arcs")?
         .iter()
         .filter(|a| lower(get(a, &["status"])).as_deref() != Some("forbidden"))
-        .filter(|a| num(a, &["strength"]).is_none_or(|s| s >= threshold))
+        // a required arc is in the graph whatever its strength, as it is
+        // drawn (#1336)
+        .filter(|a| {
+            lower(get(a, &["status"])).as_deref() == Some("required")
+                || num(a, &["strength"]).is_none_or(|s| s >= threshold)
+        })
         .filter_map(|a| Some((get(a, &["from"])?, get(a, &["to"])?)))
         .collect();
     let reference: Vec<(String, String)> = list(options, "reference")?
@@ -1269,5 +1274,15 @@ mod tests {
         low.insert("threshold".into(), json!(0.2));
         assert_eq!(root_attrs(&low).unwrap()[0].1, "2");
         assert!(root_attrs(&Row::new()).unwrap().is_empty());
+        // #1336: a required arc counts whatever its strength
+        let mut req = options.clone();
+        req.insert(
+            "arcs".into(),
+            json!([{"from": "engaged", "to": "discount", "strength": 0.9},
+                   {"from": "stay", "to": "usage", "strength": 0.7},
+                   {"from": "price", "to": "usage", "strength": 0.6},
+                   {"from": "discount", "to": "stay", "strength": 0.3, "status": "required"}]),
+        );
+        assert_eq!(root_attrs(&req).unwrap()[0].1, "2");
     }
 }

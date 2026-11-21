@@ -5,6 +5,12 @@ description: "Six months of lot records from a turning shop. The charts say seni
 
 import shotL from "../../../assets/showcase/which-lever-lowers-scrap-light.webp";
 import shotD from "../../../assets/showcase/which-lever-lowers-scrap-dark.webp";
+import causalL from "../../../assets/showcase/which-lever-lowers-scrap-causal-light.webp";
+import causalD from "../../../assets/showcase/which-lever-lowers-scrap-causal-dark.webp";
+import planL from "../../../assets/showcase/which-lever-lowers-scrap-plan-light.webp";
+import planD from "../../../assets/showcase/which-lever-lowers-scrap-plan-dark.webp";
+import graphL from "../../../assets/showcase/which-lever-lowers-scrap-graph-light.webp";
+import graphD from "../../../assets/showcase/which-lever-lowers-scrap-graph-dark.webp";
 
 A turning shop (two lines of four CNC lathes, day and night shifts) scraps too many parts. One lot in six has more than 3 % scrap, and a sixth of the deliveries are at risk. The plant manager has a budget for one fix. **Which lever is worth paying for?**
 
@@ -38,7 +44,45 @@ A Bayesian network learned from the same lot records separates **seeing** from *
 
 Seeing a senior operator mostly tells you it's a day lot: the network says *day* is 80 % likely, and overdue maintenance less likely. Setting the operator with do() cuts the arc from *Shift*, which stays 50/50, and buys about one point. Maintenance on time and a normal line speed are the levers.
 
-In the dashboard you click a lever's state to observe it, Alt-click (or the chip) to set it, and combine as many as you like. Only the six levers can be clicked; the machine, the defects and the result only react.
+In the dashboard you click a lever's state to observe it, Alt-click (or the chip) to set it, and combine as many as you like. Only the six levers can be clicked; the machine, the defects and the result only react. ⤢ shows the network full size, still clickable.
+
+**What connects what.** Hover a node and its Markov blanket lights up: its parents, its children and their other parents. Click a node's name, then hover another, and the paths between them that are open given your clicks light up. From *Supplier* to *Scrap* there is one path, through the material. Observe the material and it closes: once you know the material, the supplier tells you nothing more.
+
+**What to check first.** Next to the network, the levers are ranked by how much seeing each one on a lot would tell about its scrap, given what you have clicked so far (mutual information). With nothing known, it's the line speed; click it and the ranking moves on.
+
+## Why seeing isn't doing
+
+<figure class="doc-shot">
+  <img class="lp-light" src={causalL.src} alt="The causal view: Operator is the treatment X, Scrap the outcome Y, the back-door paths through Shift dashed, Shift ringed" />
+  <img class="lp-dark" src={causalD.src} alt="" />
+  <figcaption>The operator as the lever: the back-door paths run through the shift, which is the one thing to compare on.</figcaption>
+</figure>
+
+Pick a lever and the network is drawn as a causal question: **X** the lever, **Y** the scrap. A dashed arc is on a *back-door path*, a way for the two to hang together that doesn't run through the lever. For the operator that's *Operator ← Shift → Maintenance → … → Scrap*. Comparing lots of the same shift (the ringed node) blocks every back-door path, and what's left is the operator's own effect, the do() answer. The material has no back door, so for it seeing and doing agree. A chart sets each lever's seen effect against its done effect: where the bars differ, the chart credits a lever with its company.
+
+## The cheapest plan for a target
+
+<figure class="doc-shot">
+  <img class="lp-light" src={planL.src} alt="The plan view: cost inputs per lever, the cheapest plan meeting a 10 % scrap target, and all 32 plans as cost against high scrap" />
+  <img class="lp-dark" src={planD.src} alt="" />
+  <figcaption>Your costs per lever and a scrap target; all 32 plans looked up and ranked.</figcaption>
+</figure>
+
+Five levers, each set or left alone, make 32 plans. For each one, the network's answer to *do(all of them)* is one row of the precomputed answers. Put in what each lever costs and a target for high scrap, and the cheapest plan under the target wins. With the example costs:
+
+- the cheapest plans under 10 % are a normal line speed (8 %) or maintenance on time with inspected material (9.5 %);
+- senior operators appear in no cheap plan;
+- once all material is inspected, buying only from supplier A adds nothing, because the supplier acts on scrap only through the material.
+
+## How the graph was found
+
+<figure class="doc-shot">
+  <img class="lp-light" src={graphL.src} alt="The learned graph against the plant's: 17 matching arcs, one extra in amber, the planner's arc solid" />
+  <img class="lp-dark" src={graphD.src} alt="" />
+  <figcaption>The learned graph against the plant's true one: one extra arc, structural Hamming distance 1.</figcaption>
+</figure>
+
+A structure search learned the graph from the lots, with the process order as its only rule. Each arc's strength is how often 200 resamples of the lots found it: thick when always, dashed below a threshold you set. One arc came from a planner: *Line speed → Delivery*, which the data found in only 38 % of the resamples, stays solid as a required arc. Since the plant is simulated, the learned graph can be laid over the true one. 17 arcs match, and one is extra: *Spindle temperature drift → Scrap*, which is real in the data because scrap counts parts, not only defect classes.
 
 ## Is it right?
 
