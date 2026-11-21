@@ -13696,6 +13696,11 @@ if (typeof ResizeObserver !== "undefined")
 // Wire freshly rendered charts: hover, selection, toolbox and accessibility
 // (attachHover), then the ::STORY and ::FRAME steppers.
 function wireCharts() {
+  // #1334: a re-run panel that was full size is again, before it is wired
+  if (dpFull) fullSizeKeep();
+  wireChartsNow();
+}
+function wireChartsNow() {
   attachHover();
   mountStories();
   mountFrames();
@@ -20172,6 +20177,11 @@ function panelSvg(fig) {
 function openFullSize(fig) {
   const svg = panelSvg(fig);
   if (!svg) return;
+  // #1334: a panel whose clicks do something (an evidence, a selection, a
+  // drill or a link) is enlarged in place, so it stays live: a copy would be
+  // a picture nobody can click, and stale after the next re-run
+  const ia = fig._ia;
+  if (fig.classList?.contains("panel") && fig.dataset.stmt != null && ia && (ia.select || ia.drill || ia.link)) return openFullSizeLive(fig);
   const title = panelTitleText(fig) || "Full size";
   const back = document.createElement("div");
   back.className = "dp-modal-back";
@@ -20208,6 +20218,67 @@ function openFullSize(fig) {
   };
   document.addEventListener("keydown", onKey);
   document.body.appendChild(back);
+}
+
+// #1334: the panel itself over the page, drawn at the window's size; ✕, Esc
+// or a click beside it puts it back. Kept by the panel's statement, so the
+// panel a click re-runs comes back full size (fullSizeKeep, from wireCharts).
+let dpFull = null; // {stmt, back, x, fit, hadFit}
+const fullPanel = () => dpFull && document.querySelector(`.dash .panel[data-stmt="${dpFull.stmt}"]`);
+function fullSizeApply(panel) {
+  panel.classList.add("dp-panel-full");
+  const holder = panel.querySelector(":scope > .panel-svg");
+  const top = holder ? holder.getBoundingClientRect().top - panel.getBoundingClientRect().top : 48;
+  panel._dpFit = { w: Math.max(320, panel.clientWidth - 32), h: Math.max(240, panel.clientHeight - top - 24) };
+}
+function fullSizeKeep() {
+  const panel = fullPanel();
+  if (!panel) return closeFullSizeLive();
+  if (panel.classList.contains("dp-panel-full")) return;
+  fullSizeApply(panel);
+  fitCharts();
+}
+function closeFullSizeLive() {
+  if (!dpFull) return;
+  const { back, x, fit, hadFit } = dpFull;
+  const panel = fullPanel();
+  dpFull = null;
+  back.remove();
+  x.remove();
+  document.removeEventListener("keydown", fullSizeKey, true);
+  window.removeEventListener("resize", fullSizeResize);
+  if (!panel) return;
+  panel.classList.remove("dp-panel-full");
+  if (hadFit) panel._dpFit = fit;
+  else delete panel._dpFit;
+  if (fitCharts()) wireCharts();
+}
+function fullSizeKey(e) {
+  if (e.key === "Escape" && !document.querySelector(".dp-bn-pop")) closeFullSizeLive();
+}
+function fullSizeResize() {
+  const panel = fullPanel();
+  if (!panel) return;
+  fullSizeApply(panel);
+  if (fitCharts()) wireCharts();
+}
+function openFullSizeLive(panel) {
+  if (dpFull) closeFullSizeLive();
+  const back = document.createElement("div");
+  back.className = "dp-modal-back dp-panel-full-back";
+  const x = document.createElement("button");
+  x.type = "button";
+  x.className = "dp-modal-x dp-panel-full-x";
+  x.setAttribute("aria-label", "Close full size");
+  x.textContent = "✕";
+  x.onclick = closeFullSizeLive;
+  back.onclick = closeFullSizeLive;
+  dpFull = { stmt: panel.dataset.stmt, back, x, fit: panel._dpFit, hadFit: Object.prototype.hasOwnProperty.call(panel, "_dpFit") };
+  document.addEventListener("keydown", fullSizeKey, true);
+  window.addEventListener("resize", fullSizeResize);
+  document.body.append(back, x);
+  fullSizeApply(panel);
+  if (fitCharts()) wireCharts();
 }
 
 // Share: encode the SQL in the URL hash (no server needed).

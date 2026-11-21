@@ -4271,6 +4271,7 @@ plain SQL (exact enumeration).
 | shift-click on a node, or Enter on a focused node | a panel: observe or set a state, or a likelihood per state (soft evidence) |
 | the chip above the graph | *observe* / *do* switches the mode, × retracts, *Clear all* |
 | a click on a node's name | anchors it: hovering another node lights the `paths` between them |
+| *Full size* (⤢) in the panel's tools | the panel itself fills the window and stays clickable (any panel with clicks: a selection, a drill, a link, #1334); ✕ or Esc puts it back |
 
 `getvariable('ev')` is the evidence as **JSON text**, a list of
 `{node, state[, likelihood][, mode]}` (`'[]'` = none): one item per observed

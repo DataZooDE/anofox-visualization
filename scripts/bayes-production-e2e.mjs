@@ -99,6 +99,28 @@ await clickAt(await rowAt("maintenance", "on time"), { alt: true });
 s = await state();
 check(Math.round(pct(s.vals["scrap_rate.high"])) === 11, "do(senior) and do(maintenance on time): high scrap 11 %", s.vals["scrap_rate.high"]);
 
+// #1334: Full size (⤢) enlarges the live panel, so a click there is evidence too
+await clickAt(await rowAt("maintenance", "on time"), { alt: true }); // retract it again
+const net = page.locator(".panel:has(svg[data-diagram])");
+await net.hover();
+await net.locator('button.dp-tool[title="Full size"]').click();
+await page.waitForTimeout(800);
+const big = await page.evaluate(() => {
+  const p = document.querySelector(".panel.dp-panel-full");
+  const svg = p?.querySelector("svg[data-diagram]");
+  return p && svg ? { w: svg.getBoundingClientRect().width, vw: innerWidth } : null;
+});
+check(big && big.w > big.vw * 0.8, "Full size: the panel itself, as wide as the window", big);
+check(!(await page.locator(".dp-modal-full").count()), "Full size: no picture copy");
+await clickAt(await rowAt("line_speed", "normal"), { alt: true });
+s = await state();
+check(Math.round(pct(s.vals["scrap_rate.high"])) === 7, "Full size: do(normal line speed) by a click there (with do(senior): 7 %)", s.vals["scrap_rate.high"]);
+check(await page.locator(".panel.dp-panel-full svg[data-diagram]").count() === 1, "Full size: still full size after the re-run");
+if (shot) await page.screenshot({ path: `${shot}-full-light.png` });
+await page.keyboard.press("Escape");
+await page.waitForTimeout(600);
+check(!(await page.locator(".dp-panel-full, .dp-panel-full-back").count()), "Esc: back in the dashboard");
+
 if (shot) {
   const dark = await open("dark");
   await dark.screenshot({ path: `${shot}-dark.png`, fullPage: true });
