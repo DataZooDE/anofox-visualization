@@ -2629,7 +2629,8 @@ reaches a server.
 viewer as a writer (`docs/secure-serving.md` → "Shared write-back"): the
 server re-runs the `::SAVE` statement, checks every value against the
 declared columns and types, and appends the save to its change log (a table's `stamp` columns get
-the writer's login and the time, #1282). From
+the writer's login and the time, #1282; its `approver_only` columns may be changed by
+`options.writeback.approvers` only, #1317). From
 then on every panel that reads one of those tables — on this page, for
 every other viewer, on every dashboard of the server — reads the base table
 with the saves applied, exactly like the builder's preview. If someone
@@ -4337,7 +4338,12 @@ does all of it in SQL.
   edits*); on a locked server `options.writeback` declares `answers` with
   `"key": ["id", "who"]` and `"stamp": {"who": "user", "when": "ts"}`, so
   who is the login, when the server's clock, and each expert keeps a row of
-  their own per question (the page never sends them).
+  their own per question (the page never sends them). With
+  `"approver_only": ["decides"]` and `options.writeback.approvers`, only an
+  approver may settle a disagreement (or unsettle it): other writers see the
+  toggle disabled, and the server refuses a save that would change the
+  stored value (`403`). In the browser
+  anyone in the tab can tick it.
 - **Progress.** `effect_range` (`round, lo, hi`) as two `::LINECHART`
   lines, the decision threshold as a `::REFLINE` (a `::NUMBER` input) and
   an `::XLINE` at the first round where the range no longer straddles it.

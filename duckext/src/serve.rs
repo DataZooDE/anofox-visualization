@@ -3819,6 +3819,98 @@ fn check_save_under_policy(
     Ok(())
 }
 
+/// #1317: the first `table.column` this save of a writer who isn't an
+/// approver would change among the `approver_only` columns, or `None`.
+/// Compared with the row of the same key as the server holds it now: the
+/// base table plus `records` (the change log, read under the commit lock),
+/// built on a fresh connection to the snapshot like the reads do. A
+/// replace of such a table always counts as a change.
+fn approver_only_refusal(
+    gen: &Generation<Snapshot>,
+    w: &WritebackRuntime,
+    claims: &Claims,
+    changes: &Map<String, Value>,
+    records: &[Arc<Record>],
+) -> Result<Option<String>, String> {
+    let writes = wb::approver_only_writes(&w.opts, changes);
+    if writes.is_empty() {
+        return Ok(None);
+    }
+    let folded: Folded = wb::fold(&w.opts, records);
+    const STORED: &str = "__anofox_wb_approve";
+    for (t, op, rows) in writes {
+        let decl = &w.opts.tables[&t];
+        if op != "upsert" {
+            return Ok(Some(format!("{t}.{}", decl.approver_only[0])));
+        }
+        let c = gen.snap.db.connect()?;
+        c.exec(&gen.snap.enter)?;
+        for (name, lit) in claims.variables() {
+            c.exec(&format!("SET VARIABLE {name} = {lit}"))?;
+        }
+        let under: BTreeMap<String, String> = [(t.clone(), STORED.to_string())].into();
+        seed_writeback(&c, &w.opts, &folded, std::slice::from_ref(&t), &under)?;
+        // the save's rows, staged through an Appender (never SQL text)
+        c.exec("CREATE OR REPLACE TEMP TABLE __anofox_wb_keys (i BIGINT, \"row\" VARCHAR)")?;
+        {
+            let app =
+                crate::db::Appender::new_in(&c, Some("temp"), Some("main"), "__anofox_wb_keys")?;
+            for (i, r) in rows.iter().enumerate() {
+                app.begin_row()?;
+                app.append_int64(i as i64)?;
+                app.append_varchar(&Value::Object(r.clone()).to_string())?;
+                app.end_row()?;
+            }
+            app.close()?;
+        }
+        let key_match = decl
+            .key
+            .iter()
+            .map(|k| {
+                let ty = decl.col(k).expect("a key is a declared column");
+                format!(
+                    "d.\"{k}\" = CAST(json_extract_string(CAST(k.\"row\" AS JSON), '$.{k}') AS {})",
+                    ty.sql()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        let found = c
+            .query(&format!(
+                "SELECT CAST(k.i AS VARCHAR), CAST(to_json(d) AS VARCHAR) \
+                 FROM temp.main.__anofox_wb_keys k JOIN temp.main.\"{STORED}\" d ON {key_match}"
+            ))
+            .and_then(|mut r| r.string_rows(usize::MAX))?;
+        let mut stored: Vec<Vec<Map<String, Value>>> = vec![Vec::new(); rows.len()];
+        for r in found {
+            let (Some(Some(i)), Some(Some(j))) = (r.first(), r.get(1)) else {
+                return Err("approver check: an unreadable stored row".into());
+            };
+            let i: usize = i.parse().map_err(|_| "approver check: a bad row index")?;
+            let row = serde_json::from_str::<Value>(j)
+                .ok()
+                .and_then(|v| v.as_object().cloned())
+                .ok_or("approver check: a stored row isn't an object")?;
+            stored
+                .get_mut(i)
+                .ok_or("approver check: a row index out of range")?
+                .push(row);
+        }
+        for (r, have) in rows.iter().zip(&stored) {
+            let changed = if have.is_empty() {
+                wb::approver_only_changed(decl, r, None)
+            } else {
+                have.iter()
+                    .find_map(|h| wb::approver_only_changed(decl, r, Some(h)))
+            };
+            if let Some(col) = changed {
+                return Ok(Some(format!("{t}.{col}")));
+            }
+        }
+    }
+    Ok(None)
+}
+
 /// Plan §4.4's bound for the rate limiter's, the mutex map's and the
 /// nonce map's distinct-user count — "bounded (LRU, 100k users)".
 const SUBMIT_BOUNDED_USERS: usize = 100_000;
@@ -9163,7 +9255,7 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
                         &pv.dash,
                         scope,
                         session,
-                        (false, false, false),
+                        (false, false, false, false),
                         false,
                         false,
                         false,
@@ -9316,6 +9408,14 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
                                     && w.opts.is_writer(&c.user, &c.groups)
                             })
                     });
+                    // #1317: and set the approver-only columns? (the page
+                    // disables those fields; /api/save enforces it)
+                    let wb_approver = writer
+                        && st.writeback.as_ref().is_some_and(|w| {
+                            claims
+                                .as_ref()
+                                .is_some_and(|c| w.opts.is_approver(&c.user, &c.groups))
+                        });
                     // #1243 S2/S3: and write or approve scenarios?
                     let scenario_rights = |f: fn(
                         &anofox_visualization::host::scenarios::WriteOptions,
@@ -9366,7 +9466,7 @@ fn route_locked(st: &Locked, mut req: Request, path: &str, info: &mut LogInfo) -
                         d,
                         scope,
                         page,
-                        (writer, scenario_writer, scenario_approver),
+                        (writer, wb_approver, scenario_writer, scenario_approver),
                         ask,
                         views,
                         notes_writer,
@@ -12917,7 +13017,6 @@ fn handle_save(
             return reply(req, 400, &e);
         }
     };
-
     // #736: under an access policy, a save into a table it names is
     // checked as the writer (columns, graph replace, rows seen).
     if st.opts.policy.is_some() {
@@ -12964,6 +13063,48 @@ fn handle_save(
     let summary = wb::summary(&w.opts, &changes);
     let commit = w.commit.lock().unwrap_or_else(|p| p.into_inner());
     let (gen_now, records) = w.store.snapshot_all(usize::MAX);
+    // #1317: an approver-only column (e.g. "settle the disagreement") is
+    // changed by an approver only: a writer who isn't one may leave it out
+    // or send what is stored. Checked against the stored row (base table +
+    // the change log as of this lock), under the same lock as the append.
+    if !w.opts.is_approver(&claims.user, &claims.groups) {
+        let gen = st.current.get();
+        match approver_only_refusal(&gen, w, claims, &changes, &records) {
+            Ok(None) => {}
+            Ok(Some(col)) => {
+                drop(commit);
+                info.deny = Some("not_approver");
+                audit(
+                    "deny",
+                    Some("not_approver"),
+                    Some(&dash.id),
+                    Some(&spec.name),
+                );
+                return reply(
+                    req,
+                    403,
+                    &format!(
+                        "forbidden: only approvers may change {col} (options.writeback.approvers)"
+                    ),
+                );
+            }
+            Err(e) => {
+                drop(commit);
+                eprintln!(
+                    "[anofox-serve] approver check failed in '{}': {}",
+                    dash.id,
+                    access::diag(&e)
+                );
+                audit(
+                    "error",
+                    Some("approver_check"),
+                    Some(&dash.id),
+                    Some(&spec.name),
+                );
+                return reply(req, 500, "the save couldn't be checked");
+            }
+        }
+    }
     let since: Vec<Arc<Record>> = records.iter().filter(|r| r.seq > base).cloned().collect();
     let clashes = wb::conflicts(&w.opts, &changes, &since);
     if !clashes.is_empty() {
@@ -14545,7 +14686,7 @@ fn served_index(
     dash: &Dash,
     scope: Option<&Scope>,
     session: Option<&str>,
-    (writer, scenario_writer, scenario_approver): (bool, bool, bool),
+    (writer, wb_approver, scenario_writer, scenario_approver): (bool, bool, bool, bool),
     ask: bool,
     views: bool,
     notes_writer: bool,
@@ -14656,6 +14797,9 @@ fn served_index(
     cfg["writeback"] = serde_json::json!({
         "enabled": st.writeback.as_ref().is_some_and(|w| w.opts.enabled_for(&dash.id)),
         "writer": writer,
+        // #1317: the columns only approvers may set, and whether this viewer is one
+        "approver": wb_approver,
+        "approverOnly": st.writeback.as_ref().map(|w| w.opts.approver_only_columns()).unwrap_or_default(),
         // #684 slice 4: the generation the page loads at — its saves'
         // `base`, moved on only by its own saves and a 409's answer.
         "gen": st.writeback.as_ref().map(|w| w.store.global_seq()),

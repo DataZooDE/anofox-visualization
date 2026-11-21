@@ -22,7 +22,8 @@
 -- - the answers, an input table: Submit writes a row into `answers`
 --   (::SAVE of a ::FORM). In the browser it stays in this tab; on a locked
 --   server options.writeback declares the table and stamps who (the login)
---   and when on every row;
+--   and when on every row, and only its approvers may tick "settle the
+--   disagreement" ("approver_only": ["decides"]);
 -- - the range of the effect over every graph the data and the answers
 --   still allow, per round, against the decision threshold.
 --
@@ -395,7 +396,7 @@ ORDER BY round, which;
 SELECT 5::SPAN;
 SELECT '**Reading it.** Each round is one more settled question. The two lines are the smallest and the largest effect of quitting over the graphs the data and the answers still allow. While they straddle the threshold the decision depends on the open arrows; where both sit on one side, *Decided* marks the round from which further questions no longer change it.
 
-**Who.** In the browser an answer names its expert in *Your name* and stays in this tab. On a locked server the `answers` table is declared in `options.writeback` with `"stamp": {"who": "user", "when": "ts"}`: who is the login, when the server''s clock, and each expert keeps a row of their own per question.' ::MARKDOWN;
+**Who.** In the browser an answer names its expert in *Your name* and stays in this tab. On a locked server the `answers` table is declared in `options.writeback` with `"stamp": {"who": "user", "when": "ts"}`: who is the login, when the server''s clock, and each expert keeps a row of their own per question. With `"approver_only": ["decides"]` and `options.writeback.approvers` only an approver can settle a disagreement; in the browser anyone can.' ::MARKDOWN;
 
 SELECT 'The answers'::SECTION;
 

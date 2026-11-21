@@ -1828,6 +1828,32 @@ appends each save to a file no SQL reaches; the snapshot stays read-only.
   server's own, so `text_max_chars` doesn't cap them (a long login still
   saves). Every viewer of a dashboard that reads the stamped table sees
   each writer's login in it; an access policy can mask that column.
+- **Approver-only columns (#1317).** A table may name columns only an
+  approver may change: `"approver_only": ["decides"]`, with
+  `"approvers": {"groups": […], "users": […]}` next to `writers` (both or
+  neither: a config with one and not the other is refused at start). The
+  table's key must hold a stamped user column (`"key": ["id", "who"]`,
+  `"stamp": {"who": "user"}`), so each writer only ever saves a row of
+  their own; anything else is refused at start. A writer who isn't an
+  approver may leave such a column out of a save, or send the value already
+  stored for that row (for this rule `null`, `false`, `0` and blank text
+  are one "unset" value, so a page sending the toggle's default `false`
+  over an unset row is fine); any other value — setting it, or unsetting a
+  stored `true` — is refused with `403` ("only approvers may change
+  answers.decides"). The stored row is the base table plus the change log,
+  read under the same lock as the append (`/api/save`, after the stamp,
+  before the conflict check and the append), so two saves can't race past
+  it, and the page's own flags play no part. Blank text (any Unicode
+  whitespace) in an approver-only column is stored as `NULL`. An approver
+  still has to be a writer to save at all. The page shows those form fields
+  disabled to other writers, saying why. Only a column that isn't part of
+  the key or stamped can be approver-only. It is meant for form tables:
+  a `::SAVE_GRAPH` save replaces its tables whole (and its rows carry no
+  stamped user, so it can't save into such a table), which would drop the
+  approvers' values. In the browser (DuckDB-Wasm, no logins) there are no
+  approvers: anyone in the tab can set the field, and the row stays in
+  that tab. The *Clarifying a learned graph* example's "settle the
+  disagreement" toggle is such a column.
 - **Who.** `auth` is required; the viewer must be a personal sign-in (no API
   key, no shared embed identity) listed in `writers` by user or group, and
   the dashboard must be in `dashboards` and in the credential's scope.
