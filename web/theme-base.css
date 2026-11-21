@@ -840,6 +840,7 @@ body.dark .dp-img-row.has-dark .dp-img-missing{display:none}
 .dp-bn-chip .dp-bn-mode[aria-pressed=true]{background:var(--ax-accent);color:var(--ax-card);border-color:var(--ax-accent)}
 .dp-bn-bar .dp-bn-clear{font-size:.72rem;border:0;background:transparent;color:var(--ax-muted);cursor:pointer;text-decoration:underline;box-shadow:none}
 .dp-bn-evidence-on svg rect[data-bn]{cursor:pointer}
+.dp-bn-evidence-on svg rect[data-bn*='"settable":false']{cursor:default}
 /* a node's evidence panel (shift-click, Enter) */
 .dp-bn-pop{position:fixed;z-index:60;background:var(--ax-card);color:var(--ax-ink);border:1px solid var(--ax-line);border-radius:10px;box-shadow:var(--ax-pop-shadow);padding:.6rem .7rem;font-size:.8rem;max-width:min(26rem,calc(100vw - 16px))}
 .dp-bn-pop-title{font-weight:700;margin-bottom:.35rem;color:var(--ax-tip-head)}

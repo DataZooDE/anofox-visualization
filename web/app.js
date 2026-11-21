@@ -1110,6 +1110,7 @@ const FILE_SAMPLES = [
   "examples/statistics-churn-drivers.sql",
   "examples/bayes-auto-eda.sql",
   "examples/bayes-causal.sql",
+  "examples/bayes-production-scrap.sql",
   "examples/decide-leads.sql",
   "examples/statistics-showcase.sql",
   "examples/forecast-callcentre-staffing.sql",
@@ -22569,12 +22570,15 @@ function bnClick(el, e, sel) {
   const id = el.getAttribute("data-node");
   const svg = rootSvg(el);
   if (id == null || !el.hasAttribute("data-bn") || !svg) return false;
+  // #1331: a node the producer can't answer for (`settable` false): no
+  // evidence on it, its name still anchors the paths
+  const settable = !/"settable":false/.test(el.getAttribute("data-bn"));
   // Enter on a focused node (no pointer) or shift-click: the evidence panel
-  if (e.shiftKey || (!e.isTrusted && !e.clientX && !e.clientY)) {
+  if (settable && (e.shiftKey || (!e.isTrusted && !e.clientX && !e.clientY))) {
     bnPanel(sel, el);
     return true;
   }
-  const state = bnRowAt(svg, id, e.clientY, e.clientX);
+  const state = settable ? bnRowAt(svg, id, e.clientY, e.clientX) : null;
   if (state != null) {
     bnToggle(sel, id, state, e.altKey ? "do" : null);
     return true;

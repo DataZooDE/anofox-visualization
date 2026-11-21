@@ -1,9 +1,10 @@
 //! The `bayes_net` contract (#1275) — a Bayesian network as tables, as an
 //! engine or library (pgmpy, bnlearn, a DuckDB extension) writes it:
 //!
-//! - nodes `id, name, label, kind, states, layer, group` (kind: `chance`,
-//!   `observed`, `latent`, `decision`, `utility`, `deterministic`; states a
-//!   LIST of state names);
+//! - nodes `id, name, label, kind, states, layer, group, settable` (kind:
+//!   `chance`, `observed`, `latent`, `decision`, `utility`, `deterministic`;
+//!   states a LIST of state names; `settable` false, #1331: a reader's click
+//!   neither observes nor sets the node);
 //! - `arcs := ` `from, to, strength, direction, status` (status: `learned`,
 //!   `required`, `forbidden`);
 //! - `beliefs := ` `node, state, probability, prior, lo, hi, previous`
@@ -593,6 +594,11 @@ pub(crate) fn columns(rows: &[Row], options: &Row) -> Result<Vec<OutColumn>, Str
         let mut card = Map::new();
         card.insert("kind".into(), J::String(kind.clone()));
         card.insert("states".into(), J::Array(state_rows));
+        // #1331: `settable` false, a node the reader may not observe or set
+        // (a producer that answers only for some nodes): its clicks do nothing
+        if get(row, &["settable"]).is_some_and(|v| v.eq_ignore_ascii_case("false")) {
+            card.insert("settable".into(), J::Bool(false));
+        }
         // evidence: a hard state, or a likelihood per state (soft)
         let ev = of(&evidence, id);
         if !ev.is_empty() {
@@ -867,6 +873,20 @@ mod tests {
             "{:?}",
             lint(&nodes, &options)
         );
+    }
+
+    /// #1331: a node with `settable` false says so in its card; the others don't.
+    #[test]
+    fn settable_false_is_in_the_card() {
+        let mut fixed = node("a", "A", "chance", &["yes", "no"]);
+        fixed.insert("settable".into(), json!(false));
+        let nodes = vec![fixed, node("b", "B", "chance", &["yes", "no"])];
+        let cols = columns(&nodes, &opts(json!({"arcs": [{"from": "a", "to": "b"}]}))).unwrap();
+        let card = |i: usize| -> J {
+            serde_json::from_str(col(&cols, "BELIEF")[i].as_str().unwrap()).unwrap()
+        };
+        assert_eq!(card(0)["settable"], false);
+        assert!(card(1).get("settable").is_none());
     }
 
     /// Kinds as shapes; layers as tiers in first-appearance order; groups as
