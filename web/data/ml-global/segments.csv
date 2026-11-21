@@ -1,0 +1,33 @@
+segment,method,label,series,wape
+all items,global_model,one global model (anofox_ml),2959,37.8
+all items,moving_average,mean of the last 3 months,2959,44.7
+all items,seasonal_naive,same month last year,2959,51.9
+all items,local_models,a model per series (anofox_ml),2959,53.8
+foods,global_model,one global model (anofox_ml),1390,39.0
+foods,moving_average,mean of the last 3 months,1390,46.5
+foods,seasonal_naive,same month last year,1390,54.0
+foods,local_models,a model per series (anofox_ml),1390,55.3
+hobbies,global_model,one global model (anofox_ml),555,33.9
+hobbies,moving_average,mean of the last 3 months,555,37.3
+hobbies,seasonal_naive,same month last year,555,47.3
+hobbies,local_models,a model per series (anofox_ml),555,47.7
+household,global_model,one global model (anofox_ml),1014,36.1
+household,moving_average,mean of the last 3 months,1014,42.8
+household,seasonal_naive,same month last year,1014,47.6
+household,local_models,a model per series (anofox_ml),1014,52.3
+items on sale 2½ years or more,global_model,one global model (anofox_ml),2044,37.6
+items on sale 2½ years or more,moving_average,mean of the last 3 months,2044,45.2
+items on sale 2½ years or more,local_models,a model per series (anofox_ml),2044,49.0
+items on sale 2½ years or more,seasonal_naive,same month last year,2044,51.4
+new items (on sale < 2½ years),global_model,one global model (anofox_ml),915,38.3
+new items (on sale < 2½ years),moving_average,mean of the last 3 months,915,43.2
+new items (on sale < 2½ years),seasonal_naive,same month last year,915,53.2
+new items (on sale < 2½ years),local_models,a model per series (anofox_ml),915,67.7
+sold in 9 months or more,global_model,one global model (anofox_ml),2330,34.4
+sold in 9 months or more,moving_average,mean of the last 3 months,2330,40.8
+sold in 9 months or more,seasonal_naive,same month last year,2330,47.5
+sold in 9 months or more,local_models,a model per series (anofox_ml),2330,50.0
+sold in fewer than 9 of 12 months,global_model,one global model (anofox_ml),629,63.4
+sold in fewer than 9 of 12 months,moving_average,mean of the last 3 months,629,73.6
+sold in fewer than 9 of 12 months,local_models,a model per series (anofox_ml),629,82.4
+sold in fewer than 9 of 12 months,seasonal_naive,same month last year,629,84.3

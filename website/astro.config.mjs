@@ -84,6 +84,7 @@ export default defineConfig({
         ] },
         { label: "Use cases", items: [
           { label: "Which lever lowers scrap?", slug: "use-cases/production-scrap" },
+          { label: "Can one model forecast every item?", slug: "use-cases/global-forecast" },
         ] },
         { label: "Build", items: [
           { label: "The annotation model", slug: "build" },

@@ -1,0 +1,5 @@
+method,label,wape,mae,bias
+global_model,one global model (anofox_ml),37.8,16.29,-0.7
+moving_average,mean of the last 3 months,44.7,19.25,9.0
+seasonal_naive,same month last year,51.9,22.35,2.9
+local_models,a model per series (anofox_ml),53.8,23.19,11.1

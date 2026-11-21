@@ -1,0 +1,431 @@
+why,series,ds,method,units
+a typical item,HOUSEHOLD_1_238_CA_1,2013-05-01,actual,17.0
+a typical item,HOUSEHOLD_1_238_CA_1,2013-06-01,actual,37.0
+a typical item,HOUSEHOLD_1_238_CA_1,2013-07-01,actual,46.0
+a typical item,HOUSEHOLD_1_238_CA_1,2013-08-01,actual,40.0
+a typical item,HOUSEHOLD_1_238_CA_1,2013-09-01,actual,32.0
+a typical item,HOUSEHOLD_1_238_CA_1,2013-10-01,actual,36.0
+a typical item,HOUSEHOLD_1_238_CA_1,2013-11-01,actual,16.0
+a typical item,HOUSEHOLD_1_238_CA_1,2013-12-01,actual,25.0
+a typical item,HOUSEHOLD_1_238_CA_1,2014-01-01,actual,21.0
+a typical item,HOUSEHOLD_1_238_CA_1,2014-02-01,actual,23.0
+a typical item,HOUSEHOLD_1_238_CA_1,2014-03-01,actual,15.0
+a typical item,HOUSEHOLD_1_238_CA_1,2014-04-01,actual,23.0
+a typical item,HOUSEHOLD_1_238_CA_1,2014-05-01,actual,26.0
+a typical item,HOUSEHOLD_1_238_CA_1,2014-06-01,actual,25.0
+a typical item,HOUSEHOLD_1_238_CA_1,2014-07-01,actual,27.0
+a typical item,HOUSEHOLD_1_238_CA_1,2014-08-01,actual,36.0
+a typical item,HOUSEHOLD_1_238_CA_1,2014-09-01,actual,33.0
+a typical item,HOUSEHOLD_1_238_CA_1,2014-10-01,actual,19.0
+a typical item,HOUSEHOLD_1_238_CA_1,2014-11-01,actual,16.0
+a typical item,HOUSEHOLD_1_238_CA_1,2014-11-01,global_model,20.6
+a typical item,HOUSEHOLD_1_238_CA_1,2014-11-01,hi80,36.7
+a typical item,HOUSEHOLD_1_238_CA_1,2014-11-01,hi95,53.3
+a typical item,HOUSEHOLD_1_238_CA_1,2014-11-01,lo80,4.5
+a typical item,HOUSEHOLD_1_238_CA_1,2014-11-01,lo95,0.0
+a typical item,HOUSEHOLD_1_238_CA_1,2014-11-01,local_models,15.1
+a typical item,HOUSEHOLD_1_238_CA_1,2014-11-01,moving_average,29.3
+a typical item,HOUSEHOLD_1_238_CA_1,2014-11-01,seasonal_naive,16.0
+a typical item,HOUSEHOLD_1_238_CA_1,2014-12-01,actual,11.0
+a typical item,HOUSEHOLD_1_238_CA_1,2014-12-01,global_model,20.2
+a typical item,HOUSEHOLD_1_238_CA_1,2014-12-01,hi80,39.3
+a typical item,HOUSEHOLD_1_238_CA_1,2014-12-01,hi95,59.6
+a typical item,HOUSEHOLD_1_238_CA_1,2014-12-01,lo80,1.1
+a typical item,HOUSEHOLD_1_238_CA_1,2014-12-01,lo95,0.0
+a typical item,HOUSEHOLD_1_238_CA_1,2014-12-01,local_models,21.4
+a typical item,HOUSEHOLD_1_238_CA_1,2014-12-01,moving_average,29.3
+a typical item,HOUSEHOLD_1_238_CA_1,2014-12-01,seasonal_naive,25.0
+a typical item,HOUSEHOLD_1_238_CA_1,2015-01-01,actual,19.0
+a typical item,HOUSEHOLD_1_238_CA_1,2015-01-01,global_model,19.7
+a typical item,HOUSEHOLD_1_238_CA_1,2015-01-01,hi80,40.5
+a typical item,HOUSEHOLD_1_238_CA_1,2015-01-01,hi95,60.8
+a typical item,HOUSEHOLD_1_238_CA_1,2015-01-01,lo80,0.0
+a typical item,HOUSEHOLD_1_238_CA_1,2015-01-01,lo95,0.0
+a typical item,HOUSEHOLD_1_238_CA_1,2015-01-01,local_models,16.2
+a typical item,HOUSEHOLD_1_238_CA_1,2015-01-01,moving_average,29.3
+a typical item,HOUSEHOLD_1_238_CA_1,2015-01-01,seasonal_naive,21.0
+a typical item,HOUSEHOLD_1_238_CA_1,2015-02-01,actual,17.0
+a typical item,HOUSEHOLD_1_238_CA_1,2015-02-01,global_model,19.9
+a typical item,HOUSEHOLD_1_238_CA_1,2015-02-01,hi80,41.5
+a typical item,HOUSEHOLD_1_238_CA_1,2015-02-01,hi95,63.9
+a typical item,HOUSEHOLD_1_238_CA_1,2015-02-01,lo80,0.0
+a typical item,HOUSEHOLD_1_238_CA_1,2015-02-01,lo95,0.0
+a typical item,HOUSEHOLD_1_238_CA_1,2015-02-01,local_models,16.3
+a typical item,HOUSEHOLD_1_238_CA_1,2015-02-01,moving_average,29.3
+a typical item,HOUSEHOLD_1_238_CA_1,2015-02-01,seasonal_naive,23.0
+a typical item,HOUSEHOLD_1_238_CA_1,2015-03-01,actual,28.0
+a typical item,HOUSEHOLD_1_238_CA_1,2015-03-01,global_model,21.1
+a typical item,HOUSEHOLD_1_238_CA_1,2015-03-01,hi80,42.6
+a typical item,HOUSEHOLD_1_238_CA_1,2015-03-01,hi95,64.7
+a typical item,HOUSEHOLD_1_238_CA_1,2015-03-01,lo80,0.0
+a typical item,HOUSEHOLD_1_238_CA_1,2015-03-01,lo95,0.0
+a typical item,HOUSEHOLD_1_238_CA_1,2015-03-01,local_models,17.9
+a typical item,HOUSEHOLD_1_238_CA_1,2015-03-01,moving_average,29.3
+a typical item,HOUSEHOLD_1_238_CA_1,2015-03-01,seasonal_naive,15.0
+a typical item,HOUSEHOLD_1_238_CA_1,2015-04-01,actual,32.0
+a typical item,HOUSEHOLD_1_238_CA_1,2015-04-01,global_model,21.5
+a typical item,HOUSEHOLD_1_238_CA_1,2015-04-01,hi80,43.1
+a typical item,HOUSEHOLD_1_238_CA_1,2015-04-01,hi95,66.5
+a typical item,HOUSEHOLD_1_238_CA_1,2015-04-01,lo80,0.0
+a typical item,HOUSEHOLD_1_238_CA_1,2015-04-01,lo95,0.0
+a typical item,HOUSEHOLD_1_238_CA_1,2015-04-01,local_models,16.6
+a typical item,HOUSEHOLD_1_238_CA_1,2015-04-01,moving_average,29.3
+a typical item,HOUSEHOLD_1_238_CA_1,2015-04-01,seasonal_naive,23.0
+best seller,FOODS_3_090_CA_1,2013-05-01,actual,2567.0
+best seller,FOODS_3_090_CA_1,2013-06-01,actual,2558.0
+best seller,FOODS_3_090_CA_1,2013-07-01,actual,2796.0
+best seller,FOODS_3_090_CA_1,2013-08-01,actual,3878.0
+best seller,FOODS_3_090_CA_1,2013-09-01,actual,6814.0
+best seller,FOODS_3_090_CA_1,2013-10-01,actual,2618.0
+best seller,FOODS_3_090_CA_1,2013-11-01,actual,1029.0
+best seller,FOODS_3_090_CA_1,2013-12-01,actual,1959.0
+best seller,FOODS_3_090_CA_1,2014-01-01,actual,2052.0
+best seller,FOODS_3_090_CA_1,2014-02-01,actual,537.0
+best seller,FOODS_3_090_CA_1,2014-03-01,actual,1435.0
+best seller,FOODS_3_090_CA_1,2014-04-01,actual,2188.0
+best seller,FOODS_3_090_CA_1,2014-05-01,actual,890.0
+best seller,FOODS_3_090_CA_1,2014-06-01,actual,1630.0
+best seller,FOODS_3_090_CA_1,2014-07-01,actual,2418.0
+best seller,FOODS_3_090_CA_1,2014-08-01,actual,2283.0
+best seller,FOODS_3_090_CA_1,2014-09-01,actual,2571.0
+best seller,FOODS_3_090_CA_1,2014-10-01,actual,2897.0
+best seller,FOODS_3_090_CA_1,2014-11-01,actual,2544.0
+best seller,FOODS_3_090_CA_1,2014-11-01,global_model,2087.5
+best seller,FOODS_3_090_CA_1,2014-11-01,hi80,3256.9
+best seller,FOODS_3_090_CA_1,2014-11-01,hi95,4466.6
+best seller,FOODS_3_090_CA_1,2014-11-01,lo80,918.1
+best seller,FOODS_3_090_CA_1,2014-11-01,lo95,0.0
+best seller,FOODS_3_090_CA_1,2014-11-01,local_models,1385.9
+best seller,FOODS_3_090_CA_1,2014-11-01,moving_average,2583.7
+best seller,FOODS_3_090_CA_1,2014-11-01,seasonal_naive,1029.0
+best seller,FOODS_3_090_CA_1,2014-12-01,actual,0.0
+best seller,FOODS_3_090_CA_1,2014-12-01,global_model,2015.6
+best seller,FOODS_3_090_CA_1,2014-12-01,hi80,3406.0
+best seller,FOODS_3_090_CA_1,2014-12-01,hi95,4884.7
+best seller,FOODS_3_090_CA_1,2014-12-01,lo80,625.3
+best seller,FOODS_3_090_CA_1,2014-12-01,lo95,0.0
+best seller,FOODS_3_090_CA_1,2014-12-01,local_models,1592.0
+best seller,FOODS_3_090_CA_1,2014-12-01,moving_average,2583.7
+best seller,FOODS_3_090_CA_1,2014-12-01,seasonal_naive,1959.0
+best seller,FOODS_3_090_CA_1,2015-01-01,actual,2231.0
+best seller,FOODS_3_090_CA_1,2015-01-01,global_model,1910.4
+best seller,FOODS_3_090_CA_1,2015-01-01,hi80,3420.4
+best seller,FOODS_3_090_CA_1,2015-01-01,hi95,4900.2
+best seller,FOODS_3_090_CA_1,2015-01-01,lo80,400.3
+best seller,FOODS_3_090_CA_1,2015-01-01,lo95,0.0
+best seller,FOODS_3_090_CA_1,2015-01-01,local_models,1384.3
+best seller,FOODS_3_090_CA_1,2015-01-01,moving_average,2583.7
+best seller,FOODS_3_090_CA_1,2015-01-01,seasonal_naive,2052.0
+best seller,FOODS_3_090_CA_1,2015-02-01,actual,1038.0
+best seller,FOODS_3_090_CA_1,2015-02-01,global_model,1817.4
+best seller,FOODS_3_090_CA_1,2015-02-01,hi80,3391.2
+best seller,FOODS_3_090_CA_1,2015-02-01,hi95,5017.8
+best seller,FOODS_3_090_CA_1,2015-02-01,lo80,243.5
+best seller,FOODS_3_090_CA_1,2015-02-01,lo95,0.0
+best seller,FOODS_3_090_CA_1,2015-02-01,local_models,530.3
+best seller,FOODS_3_090_CA_1,2015-02-01,moving_average,2583.7
+best seller,FOODS_3_090_CA_1,2015-02-01,seasonal_naive,537.0
+best seller,FOODS_3_090_CA_1,2015-03-01,actual,1238.0
+best seller,FOODS_3_090_CA_1,2015-03-01,global_model,1916.8
+best seller,FOODS_3_090_CA_1,2015-03-01,hi80,3480.6
+best seller,FOODS_3_090_CA_1,2015-03-01,hi95,5090.7
+best seller,FOODS_3_090_CA_1,2015-03-01,lo80,353.1
+best seller,FOODS_3_090_CA_1,2015-03-01,lo95,0.0
+best seller,FOODS_3_090_CA_1,2015-03-01,local_models,1256.0
+best seller,FOODS_3_090_CA_1,2015-03-01,moving_average,2583.7
+best seller,FOODS_3_090_CA_1,2015-03-01,seasonal_naive,1435.0
+best seller,FOODS_3_090_CA_1,2015-04-01,actual,1942.0
+best seller,FOODS_3_090_CA_1,2015-04-01,global_model,1968.9
+best seller,FOODS_3_090_CA_1,2015-04-01,hi80,3539.7
+best seller,FOODS_3_090_CA_1,2015-04-01,hi95,5240.0
+best seller,FOODS_3_090_CA_1,2015-04-01,lo80,398.1
+best seller,FOODS_3_090_CA_1,2015-04-01,lo95,0.0
+best seller,FOODS_3_090_CA_1,2015-04-01,local_models,1576.1
+best seller,FOODS_3_090_CA_1,2015-04-01,moving_average,2583.7
+best seller,FOODS_3_090_CA_1,2015-04-01,seasonal_naive,2188.0
+hobbies best seller,HOBBIES_1_371_CA_1,2013-05-01,actual,315.0
+hobbies best seller,HOBBIES_1_371_CA_1,2013-06-01,actual,502.0
+hobbies best seller,HOBBIES_1_371_CA_1,2013-07-01,actual,489.0
+hobbies best seller,HOBBIES_1_371_CA_1,2013-08-01,actual,488.0
+hobbies best seller,HOBBIES_1_371_CA_1,2013-09-01,actual,324.0
+hobbies best seller,HOBBIES_1_371_CA_1,2013-10-01,actual,544.0
+hobbies best seller,HOBBIES_1_371_CA_1,2013-11-01,actual,361.0
+hobbies best seller,HOBBIES_1_371_CA_1,2013-12-01,actual,443.0
+hobbies best seller,HOBBIES_1_371_CA_1,2014-01-01,actual,435.0
+hobbies best seller,HOBBIES_1_371_CA_1,2014-02-01,actual,335.0
+hobbies best seller,HOBBIES_1_371_CA_1,2014-03-01,actual,415.0
+hobbies best seller,HOBBIES_1_371_CA_1,2014-04-01,actual,477.0
+hobbies best seller,HOBBIES_1_371_CA_1,2014-05-01,actual,379.0
+hobbies best seller,HOBBIES_1_371_CA_1,2014-06-01,actual,417.0
+hobbies best seller,HOBBIES_1_371_CA_1,2014-07-01,actual,308.0
+hobbies best seller,HOBBIES_1_371_CA_1,2014-08-01,actual,325.0
+hobbies best seller,HOBBIES_1_371_CA_1,2014-09-01,actual,397.0
+hobbies best seller,HOBBIES_1_371_CA_1,2014-10-01,actual,361.0
+hobbies best seller,HOBBIES_1_371_CA_1,2014-11-01,actual,500.0
+hobbies best seller,HOBBIES_1_371_CA_1,2014-11-01,global_model,349.6
+hobbies best seller,HOBBIES_1_371_CA_1,2014-11-01,hi80,598.7
+hobbies best seller,HOBBIES_1_371_CA_1,2014-11-01,hi95,856.4
+hobbies best seller,HOBBIES_1_371_CA_1,2014-11-01,lo80,100.6
+hobbies best seller,HOBBIES_1_371_CA_1,2014-11-01,lo95,0.0
+hobbies best seller,HOBBIES_1_371_CA_1,2014-11-01,local_models,118.4
+hobbies best seller,HOBBIES_1_371_CA_1,2014-11-01,moving_average,361.0
+hobbies best seller,HOBBIES_1_371_CA_1,2014-11-01,seasonal_naive,361.0
+hobbies best seller,HOBBIES_1_371_CA_1,2014-12-01,actual,434.0
+hobbies best seller,HOBBIES_1_371_CA_1,2014-12-01,global_model,350.9
+hobbies best seller,HOBBIES_1_371_CA_1,2014-12-01,hi80,647.1
+hobbies best seller,HOBBIES_1_371_CA_1,2014-12-01,hi95,962.0
+hobbies best seller,HOBBIES_1_371_CA_1,2014-12-01,lo80,54.8
+hobbies best seller,HOBBIES_1_371_CA_1,2014-12-01,lo95,0.0
+hobbies best seller,HOBBIES_1_371_CA_1,2014-12-01,local_models,155.3
+hobbies best seller,HOBBIES_1_371_CA_1,2014-12-01,moving_average,361.0
+hobbies best seller,HOBBIES_1_371_CA_1,2014-12-01,seasonal_naive,443.0
+hobbies best seller,HOBBIES_1_371_CA_1,2015-01-01,actual,409.0
+hobbies best seller,HOBBIES_1_371_CA_1,2015-01-01,global_model,321.0
+hobbies best seller,HOBBIES_1_371_CA_1,2015-01-01,hi80,642.6
+hobbies best seller,HOBBIES_1_371_CA_1,2015-01-01,hi95,957.8
+hobbies best seller,HOBBIES_1_371_CA_1,2015-01-01,lo80,0.0
+hobbies best seller,HOBBIES_1_371_CA_1,2015-01-01,lo95,0.0
+hobbies best seller,HOBBIES_1_371_CA_1,2015-01-01,local_models,147.1
+hobbies best seller,HOBBIES_1_371_CA_1,2015-01-01,moving_average,361.0
+hobbies best seller,HOBBIES_1_371_CA_1,2015-01-01,seasonal_naive,435.0
+hobbies best seller,HOBBIES_1_371_CA_1,2015-02-01,actual,353.0
+hobbies best seller,HOBBIES_1_371_CA_1,2015-02-01,global_model,311.6
+hobbies best seller,HOBBIES_1_371_CA_1,2015-02-01,hi80,646.8
+hobbies best seller,HOBBIES_1_371_CA_1,2015-02-01,hi95,993.3
+hobbies best seller,HOBBIES_1_371_CA_1,2015-02-01,lo80,0.0
+hobbies best seller,HOBBIES_1_371_CA_1,2015-02-01,lo95,0.0
+hobbies best seller,HOBBIES_1_371_CA_1,2015-02-01,local_models,406.5
+hobbies best seller,HOBBIES_1_371_CA_1,2015-02-01,moving_average,361.0
+hobbies best seller,HOBBIES_1_371_CA_1,2015-02-01,seasonal_naive,335.0
+hobbies best seller,HOBBIES_1_371_CA_1,2015-03-01,actual,382.0
+hobbies best seller,HOBBIES_1_371_CA_1,2015-03-01,global_model,341.3
+hobbies best seller,HOBBIES_1_371_CA_1,2015-03-01,hi80,674.4
+hobbies best seller,HOBBIES_1_371_CA_1,2015-03-01,hi95,1017.3
+hobbies best seller,HOBBIES_1_371_CA_1,2015-03-01,lo80,8.2
+hobbies best seller,HOBBIES_1_371_CA_1,2015-03-01,lo95,0.0
+hobbies best seller,HOBBIES_1_371_CA_1,2015-03-01,local_models,324.1
+hobbies best seller,HOBBIES_1_371_CA_1,2015-03-01,moving_average,361.0
+hobbies best seller,HOBBIES_1_371_CA_1,2015-03-01,seasonal_naive,415.0
+hobbies best seller,HOBBIES_1_371_CA_1,2015-04-01,actual,447.0
+hobbies best seller,HOBBIES_1_371_CA_1,2015-04-01,global_model,342.1
+hobbies best seller,HOBBIES_1_371_CA_1,2015-04-01,hi80,676.6
+hobbies best seller,HOBBIES_1_371_CA_1,2015-04-01,hi95,1038.8
+hobbies best seller,HOBBIES_1_371_CA_1,2015-04-01,lo80,7.5
+hobbies best seller,HOBBIES_1_371_CA_1,2015-04-01,lo95,0.0
+hobbies best seller,HOBBIES_1_371_CA_1,2015-04-01,local_models,456.7
+hobbies best seller,HOBBIES_1_371_CA_1,2015-04-01,moving_average,361.0
+hobbies best seller,HOBBIES_1_371_CA_1,2015-04-01,seasonal_naive,477.0
+household best seller,HOUSEHOLD_1_110_CA_1,2013-05-01,actual,412.0
+household best seller,HOUSEHOLD_1_110_CA_1,2013-06-01,actual,494.0
+household best seller,HOUSEHOLD_1_110_CA_1,2013-07-01,actual,542.0
+household best seller,HOUSEHOLD_1_110_CA_1,2013-08-01,actual,284.0
+household best seller,HOUSEHOLD_1_110_CA_1,2013-09-01,actual,408.0
+household best seller,HOUSEHOLD_1_110_CA_1,2013-10-01,actual,462.0
+household best seller,HOUSEHOLD_1_110_CA_1,2013-11-01,actual,370.0
+household best seller,HOUSEHOLD_1_110_CA_1,2013-12-01,actual,279.0
+household best seller,HOUSEHOLD_1_110_CA_1,2014-01-01,actual,114.0
+household best seller,HOUSEHOLD_1_110_CA_1,2014-02-01,actual,273.0
+household best seller,HOUSEHOLD_1_110_CA_1,2014-03-01,actual,373.0
+household best seller,HOUSEHOLD_1_110_CA_1,2014-04-01,actual,340.0
+household best seller,HOUSEHOLD_1_110_CA_1,2014-05-01,actual,362.0
+household best seller,HOUSEHOLD_1_110_CA_1,2014-06-01,actual,296.0
+household best seller,HOUSEHOLD_1_110_CA_1,2014-07-01,actual,216.0
+household best seller,HOUSEHOLD_1_110_CA_1,2014-08-01,actual,156.0
+household best seller,HOUSEHOLD_1_110_CA_1,2014-09-01,actual,145.0
+household best seller,HOUSEHOLD_1_110_CA_1,2014-10-01,actual,235.0
+household best seller,HOUSEHOLD_1_110_CA_1,2014-11-01,actual,227.0
+household best seller,HOUSEHOLD_1_110_CA_1,2014-11-01,global_model,224.9
+household best seller,HOUSEHOLD_1_110_CA_1,2014-11-01,hi80,394.2
+household best seller,HOUSEHOLD_1_110_CA_1,2014-11-01,hi95,569.3
+household best seller,HOUSEHOLD_1_110_CA_1,2014-11-01,lo80,55.6
+household best seller,HOUSEHOLD_1_110_CA_1,2014-11-01,lo95,0.0
+household best seller,HOUSEHOLD_1_110_CA_1,2014-11-01,local_models,219.2
+household best seller,HOUSEHOLD_1_110_CA_1,2014-11-01,moving_average,178.7
+household best seller,HOUSEHOLD_1_110_CA_1,2014-11-01,seasonal_naive,370.0
+household best seller,HOUSEHOLD_1_110_CA_1,2014-12-01,actual,303.0
+household best seller,HOUSEHOLD_1_110_CA_1,2014-12-01,global_model,218.5
+household best seller,HOUSEHOLD_1_110_CA_1,2014-12-01,hi80,419.8
+household best seller,HOUSEHOLD_1_110_CA_1,2014-12-01,hi95,633.9
+household best seller,HOUSEHOLD_1_110_CA_1,2014-12-01,lo80,17.2
+household best seller,HOUSEHOLD_1_110_CA_1,2014-12-01,lo95,0.0
+household best seller,HOUSEHOLD_1_110_CA_1,2014-12-01,local_models,174.2
+household best seller,HOUSEHOLD_1_110_CA_1,2014-12-01,moving_average,178.7
+household best seller,HOUSEHOLD_1_110_CA_1,2014-12-01,seasonal_naive,279.0
+household best seller,HOUSEHOLD_1_110_CA_1,2015-01-01,actual,232.0
+household best seller,HOUSEHOLD_1_110_CA_1,2015-01-01,global_model,209.8
+household best seller,HOUSEHOLD_1_110_CA_1,2015-01-01,hi80,428.5
+household best seller,HOUSEHOLD_1_110_CA_1,2015-01-01,hi95,642.7
+household best seller,HOUSEHOLD_1_110_CA_1,2015-01-01,lo80,0.0
+household best seller,HOUSEHOLD_1_110_CA_1,2015-01-01,lo95,0.0
+household best seller,HOUSEHOLD_1_110_CA_1,2015-01-01,local_models,156.6
+household best seller,HOUSEHOLD_1_110_CA_1,2015-01-01,moving_average,178.7
+household best seller,HOUSEHOLD_1_110_CA_1,2015-01-01,seasonal_naive,114.0
+household best seller,HOUSEHOLD_1_110_CA_1,2015-02-01,actual,258.0
+household best seller,HOUSEHOLD_1_110_CA_1,2015-02-01,global_model,209.4
+household best seller,HOUSEHOLD_1_110_CA_1,2015-02-01,hi80,437.3
+household best seller,HOUSEHOLD_1_110_CA_1,2015-02-01,hi95,672.8
+household best seller,HOUSEHOLD_1_110_CA_1,2015-02-01,lo80,0.0
+household best seller,HOUSEHOLD_1_110_CA_1,2015-02-01,lo95,0.0
+household best seller,HOUSEHOLD_1_110_CA_1,2015-02-01,local_models,207.0
+household best seller,HOUSEHOLD_1_110_CA_1,2015-02-01,moving_average,178.7
+household best seller,HOUSEHOLD_1_110_CA_1,2015-02-01,seasonal_naive,273.0
+household best seller,HOUSEHOLD_1_110_CA_1,2015-03-01,actual,359.0
+household best seller,HOUSEHOLD_1_110_CA_1,2015-03-01,global_model,230.5
+household best seller,HOUSEHOLD_1_110_CA_1,2015-03-01,hi80,456.9
+household best seller,HOUSEHOLD_1_110_CA_1,2015-03-01,hi95,690.0
+household best seller,HOUSEHOLD_1_110_CA_1,2015-03-01,lo80,4.1
+household best seller,HOUSEHOLD_1_110_CA_1,2015-03-01,lo95,0.0
+household best seller,HOUSEHOLD_1_110_CA_1,2015-03-01,local_models,247.5
+household best seller,HOUSEHOLD_1_110_CA_1,2015-03-01,moving_average,178.7
+household best seller,HOUSEHOLD_1_110_CA_1,2015-03-01,seasonal_naive,373.0
+household best seller,HOUSEHOLD_1_110_CA_1,2015-04-01,actual,405.0
+household best seller,HOUSEHOLD_1_110_CA_1,2015-04-01,global_model,226.9
+household best seller,HOUSEHOLD_1_110_CA_1,2015-04-01,hi80,454.3
+household best seller,HOUSEHOLD_1_110_CA_1,2015-04-01,hi95,700.5
+household best seller,HOUSEHOLD_1_110_CA_1,2015-04-01,lo80,0.0
+household best seller,HOUSEHOLD_1_110_CA_1,2015-04-01,lo95,0.0
+household best seller,HOUSEHOLD_1_110_CA_1,2015-04-01,local_models,248.7
+household best seller,HOUSEHOLD_1_110_CA_1,2015-04-01,moving_average,178.7
+household best seller,HOUSEHOLD_1_110_CA_1,2015-04-01,seasonal_naive,340.0
+new item,FOODS_3_282_CA_1,2013-07-01,actual,8.0
+new item,FOODS_3_282_CA_1,2013-08-01,actual,983.0
+new item,FOODS_3_282_CA_1,2013-09-01,actual,974.0
+new item,FOODS_3_282_CA_1,2013-10-01,actual,888.0
+new item,FOODS_3_282_CA_1,2013-11-01,actual,1342.0
+new item,FOODS_3_282_CA_1,2013-12-01,actual,1625.0
+new item,FOODS_3_282_CA_1,2014-01-01,actual,900.0
+new item,FOODS_3_282_CA_1,2014-02-01,actual,800.0
+new item,FOODS_3_282_CA_1,2014-03-01,actual,687.0
+new item,FOODS_3_282_CA_1,2014-04-01,actual,772.0
+new item,FOODS_3_282_CA_1,2014-05-01,actual,707.0
+new item,FOODS_3_282_CA_1,2014-06-01,actual,884.0
+new item,FOODS_3_282_CA_1,2014-07-01,actual,939.0
+new item,FOODS_3_282_CA_1,2014-08-01,actual,1057.0
+new item,FOODS_3_282_CA_1,2014-09-01,actual,759.0
+new item,FOODS_3_282_CA_1,2014-10-01,actual,657.0
+new item,FOODS_3_282_CA_1,2014-11-01,actual,994.0
+new item,FOODS_3_282_CA_1,2014-11-01,global_model,739.1
+new item,FOODS_3_282_CA_1,2014-11-01,hi80,1333.9
+new item,FOODS_3_282_CA_1,2014-11-01,hi95,1949.3
+new item,FOODS_3_282_CA_1,2014-11-01,lo80,144.2
+new item,FOODS_3_282_CA_1,2014-11-01,lo95,0.0
+new item,FOODS_3_282_CA_1,2014-11-01,local_models,1841.0
+new item,FOODS_3_282_CA_1,2014-11-01,moving_average,824.3
+new item,FOODS_3_282_CA_1,2014-11-01,seasonal_naive,1342.0
+new item,FOODS_3_282_CA_1,2014-12-01,actual,923.0
+new item,FOODS_3_282_CA_1,2014-12-01,global_model,769.3
+new item,FOODS_3_282_CA_1,2014-12-01,hi80,1476.5
+new item,FOODS_3_282_CA_1,2014-12-01,hi95,2228.8
+new item,FOODS_3_282_CA_1,2014-12-01,lo80,62.0
+new item,FOODS_3_282_CA_1,2014-12-01,lo95,0.0
+new item,FOODS_3_282_CA_1,2014-12-01,local_models,1904.4
+new item,FOODS_3_282_CA_1,2014-12-01,moving_average,824.3
+new item,FOODS_3_282_CA_1,2014-12-01,seasonal_naive,1625.0
+new item,FOODS_3_282_CA_1,2015-01-01,actual,1654.0
+new item,FOODS_3_282_CA_1,2015-01-01,global_model,700.4
+new item,FOODS_3_282_CA_1,2015-01-01,hi80,1468.6
+new item,FOODS_3_282_CA_1,2015-01-01,hi95,2221.4
+new item,FOODS_3_282_CA_1,2015-01-01,lo80,0.0
+new item,FOODS_3_282_CA_1,2015-01-01,lo95,0.0
+new item,FOODS_3_282_CA_1,2015-01-01,local_models,847.4
+new item,FOODS_3_282_CA_1,2015-01-01,moving_average,824.3
+new item,FOODS_3_282_CA_1,2015-01-01,seasonal_naive,900.0
+new item,FOODS_3_282_CA_1,2015-02-01,actual,1216.0
+new item,FOODS_3_282_CA_1,2015-02-01,global_model,716.4
+new item,FOODS_3_282_CA_1,2015-02-01,hi80,1517.0
+new item,FOODS_3_282_CA_1,2015-02-01,hi95,2344.4
+new item,FOODS_3_282_CA_1,2015-02-01,lo80,0.0
+new item,FOODS_3_282_CA_1,2015-02-01,lo95,0.0
+new item,FOODS_3_282_CA_1,2015-02-01,local_models,782.8
+new item,FOODS_3_282_CA_1,2015-02-01,moving_average,824.3
+new item,FOODS_3_282_CA_1,2015-02-01,seasonal_naive,800.0
+new item,FOODS_3_282_CA_1,2015-03-01,actual,789.0
+new item,FOODS_3_282_CA_1,2015-03-01,global_model,759.8
+new item,FOODS_3_282_CA_1,2015-03-01,hi80,1555.3
+new item,FOODS_3_282_CA_1,2015-03-01,hi95,2374.4
+new item,FOODS_3_282_CA_1,2015-03-01,lo80,0.0
+new item,FOODS_3_282_CA_1,2015-03-01,lo95,0.0
+new item,FOODS_3_282_CA_1,2015-03-01,local_models,684.2
+new item,FOODS_3_282_CA_1,2015-03-01,moving_average,824.3
+new item,FOODS_3_282_CA_1,2015-03-01,seasonal_naive,687.0
+new item,FOODS_3_282_CA_1,2015-04-01,actual,692.0
+new item,FOODS_3_282_CA_1,2015-04-01,global_model,762.3
+new item,FOODS_3_282_CA_1,2015-04-01,hi80,1561.4
+new item,FOODS_3_282_CA_1,2015-04-01,hi95,2426.3
+new item,FOODS_3_282_CA_1,2015-04-01,lo80,0.0
+new item,FOODS_3_282_CA_1,2015-04-01,lo95,0.0
+new item,FOODS_3_282_CA_1,2015-04-01,local_models,747.0
+new item,FOODS_3_282_CA_1,2015-04-01,moving_average,824.3
+new item,FOODS_3_282_CA_1,2015-04-01,seasonal_naive,772.0
+sells in few months,FOODS_3_511_CA_1,2013-05-01,actual,122.0
+sells in few months,FOODS_3_511_CA_1,2013-06-01,actual,417.0
+sells in few months,FOODS_3_511_CA_1,2013-07-01,actual,155.0
+sells in few months,FOODS_3_511_CA_1,2013-08-01,actual,0.0
+sells in few months,FOODS_3_511_CA_1,2013-09-01,actual,0.0
+sells in few months,FOODS_3_511_CA_1,2013-10-01,actual,228.0
+sells in few months,FOODS_3_511_CA_1,2013-11-01,actual,326.0
+sells in few months,FOODS_3_511_CA_1,2013-12-01,actual,0.0
+sells in few months,FOODS_3_511_CA_1,2014-01-01,actual,0.0
+sells in few months,FOODS_3_511_CA_1,2014-02-01,actual,0.0
+sells in few months,FOODS_3_511_CA_1,2014-03-01,actual,0.0
+sells in few months,FOODS_3_511_CA_1,2014-04-01,actual,0.0
+sells in few months,FOODS_3_511_CA_1,2014-05-01,actual,112.0
+sells in few months,FOODS_3_511_CA_1,2014-06-01,actual,379.0
+sells in few months,FOODS_3_511_CA_1,2014-07-01,actual,122.0
+sells in few months,FOODS_3_511_CA_1,2014-08-01,actual,0.0
+sells in few months,FOODS_3_511_CA_1,2014-09-01,actual,0.0
+sells in few months,FOODS_3_511_CA_1,2014-10-01,actual,177.0
+sells in few months,FOODS_3_511_CA_1,2014-11-01,actual,520.0
+sells in few months,FOODS_3_511_CA_1,2014-11-01,global_model,189.9
+sells in few months,FOODS_3_511_CA_1,2014-11-01,hi80,250.1
+sells in few months,FOODS_3_511_CA_1,2014-11-01,hi95,312.4
+sells in few months,FOODS_3_511_CA_1,2014-11-01,lo80,129.7
+sells in few months,FOODS_3_511_CA_1,2014-11-01,lo95,67.4
+sells in few months,FOODS_3_511_CA_1,2014-11-01,local_models,257.0
+sells in few months,FOODS_3_511_CA_1,2014-11-01,moving_average,59.0
+sells in few months,FOODS_3_511_CA_1,2014-11-01,seasonal_naive,326.0
+sells in few months,FOODS_3_511_CA_1,2014-12-01,actual,487.0
+sells in few months,FOODS_3_511_CA_1,2014-12-01,global_model,106.7
+sells in few months,FOODS_3_511_CA_1,2014-12-01,hi80,178.3
+sells in few months,FOODS_3_511_CA_1,2014-12-01,hi95,254.5
+sells in few months,FOODS_3_511_CA_1,2014-12-01,lo80,35.1
+sells in few months,FOODS_3_511_CA_1,2014-12-01,lo95,0.0
+sells in few months,FOODS_3_511_CA_1,2014-12-01,local_models,56.3
+sells in few months,FOODS_3_511_CA_1,2014-12-01,moving_average,59.0
+sells in few months,FOODS_3_511_CA_1,2014-12-01,seasonal_naive,0.0
+sells in few months,FOODS_3_511_CA_1,2015-01-01,actual,596.0
+sells in few months,FOODS_3_511_CA_1,2015-01-01,global_model,149.3
+sells in few months,FOODS_3_511_CA_1,2015-01-01,hi80,227.1
+sells in few months,FOODS_3_511_CA_1,2015-01-01,hi95,303.3
+sells in few months,FOODS_3_511_CA_1,2015-01-01,lo80,71.6
+sells in few months,FOODS_3_511_CA_1,2015-01-01,lo95,0.0
+sells in few months,FOODS_3_511_CA_1,2015-01-01,local_models,85.5
+sells in few months,FOODS_3_511_CA_1,2015-01-01,moving_average,59.0
+sells in few months,FOODS_3_511_CA_1,2015-01-01,seasonal_naive,0.0
+sells in few months,FOODS_3_511_CA_1,2015-02-01,actual,487.0
+sells in few months,FOODS_3_511_CA_1,2015-02-01,global_model,143.6
+sells in few months,FOODS_3_511_CA_1,2015-02-01,hi80,224.6
+sells in few months,FOODS_3_511_CA_1,2015-02-01,hi95,308.4
+sells in few months,FOODS_3_511_CA_1,2015-02-01,lo80,62.5
+sells in few months,FOODS_3_511_CA_1,2015-02-01,lo95,0.0
+sells in few months,FOODS_3_511_CA_1,2015-02-01,local_models,83.2
+sells in few months,FOODS_3_511_CA_1,2015-02-01,moving_average,59.0
+sells in few months,FOODS_3_511_CA_1,2015-02-01,seasonal_naive,0.0
+sells in few months,FOODS_3_511_CA_1,2015-03-01,actual,0.0
+sells in few months,FOODS_3_511_CA_1,2015-03-01,global_model,146.4
+sells in few months,FOODS_3_511_CA_1,2015-03-01,hi80,226.9
+sells in few months,FOODS_3_511_CA_1,2015-03-01,hi95,309.8
+sells in few months,FOODS_3_511_CA_1,2015-03-01,lo80,65.8
+sells in few months,FOODS_3_511_CA_1,2015-03-01,lo95,0.0
+sells in few months,FOODS_3_511_CA_1,2015-03-01,local_models,86.3
+sells in few months,FOODS_3_511_CA_1,2015-03-01,moving_average,59.0
+sells in few months,FOODS_3_511_CA_1,2015-03-01,seasonal_naive,0.0
+sells in few months,FOODS_3_511_CA_1,2015-04-01,actual,0.0
+sells in few months,FOODS_3_511_CA_1,2015-04-01,global_model,146.7
+sells in few months,FOODS_3_511_CA_1,2015-04-01,hi80,227.6
+sells in few months,FOODS_3_511_CA_1,2015-04-01,hi95,315.2
+sells in few months,FOODS_3_511_CA_1,2015-04-01,lo80,65.8
+sells in few months,FOODS_3_511_CA_1,2015-04-01,lo95,0.0
+sells in few months,FOODS_3_511_CA_1,2015-04-01,local_models,71.3
+sells in few months,FOODS_3_511_CA_1,2015-04-01,moving_average,59.0
+sells in few months,FOODS_3_511_CA_1,2015-04-01,seasonal_naive,0.0
