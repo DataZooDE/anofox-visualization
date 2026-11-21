@@ -151,7 +151,7 @@ for (const t of tables) {
 }
 if (tabular && hintChecks.length) {
   try {
-    const out = execFileSync(DUCKDB, ["-unsigned", "-readonly", dbFile, "-json", "-c", tabularChecksSql(hintChecks, true)], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 1 << 26 });
+    const out = execFileSync(DUCKDB, ["-unsigned", "-readonly", dbFile, "-json", "-c", tabularChecksSql(hintChecks, true)], { cwd: WEB, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 1 << 26 });
     const res = JSON.parse(out.trim());
     const bad = res.filter((r) => !["pass", "fail", "warn"].includes(r.status));
     if (res.length !== hintChecks.length || bad.length) failures.push(`hint checks: ${res.length}/${hintChecks.length} results, ${bad.map((r) => `${r.check_name}: ${r.message}`).join("; ")}`);
