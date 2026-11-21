@@ -22,7 +22,7 @@ const arg = (k, d) => {
   return i > 0 ? process.argv[i + 1] : d;
 };
 const DUCKDB = arg("--duckdb", "duckdb");
-const DASH = arg("--dashboard", path.join(root, "target/debug/dashboard"));
+const DASH = path.resolve(arg("--dashboard", path.join(root, "target/debug/dashboard")));
 const out = arg("--out", mkdtempSync(path.join(os.tmpdir(), "explore-starters-")));
 mkdirSync(out, { recursive: true });
 for (const [what, p] of [["web/pkg (wasm-pack build)", path.join(root, "web/pkg/anofox_visualization_bg.wasm")], ["the dashboard CLI (cargo build --bin dashboard)", DASH]])
@@ -34,11 +34,13 @@ for (const [what, p] of [["web/pkg (wasm-pack build)", path.join(root, "web/pkg/
 const wasm = await import(path.join(root, "web/pkg/anofox_visualization.js"));
 wasm.initSync({ module: readFileSync(path.join(root, "web/pkg/anofox_visualization_bg.wasm")) });
 
-const dbFile = path.join(out, "samples.duckdb");
+const dbFile = path.resolve(out, "samples.duckdb");
+// every DuckDB here runs in web/: the examples' views read 'data/…' relative to it (#1322)
+const WEB = path.join(root, "web");
 rmSync(dbFile, { force: true });
 const duck = (sql, { readonly = false } = {}) =>
   execFileSync(DUCKDB, [...(readonly ? ["-readonly"] : []), dbFile, "-json", "-c", sql], {
-    cwd: path.join(root, "web"), // examples read 'data/…' relative to web/
+    cwd: WEB, // examples read 'data/…' relative to web/
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
     maxBuffer: 1 << 28,
@@ -137,7 +139,7 @@ for (const t of tables) {
   writeFileSync(file, sql);
   let res;
   try {
-    res = JSON.parse(execFileSync(DASH, ["--check", file, "--strict", "--json", "--db", dbFile], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
+    res = JSON.parse(execFileSync(DASH, ["--check", path.resolve(file), "--strict", "--json", "--db", dbFile], { cwd: WEB, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
   } catch (e) {
     res = e.stdout ? JSON.parse(e.stdout) : { ok: false, diagnostics: [{ severity: "error", code: "cli", message: String(e.stderr || e) }] };
   }
@@ -166,7 +168,7 @@ const lint = (name, sql) => {
   writeFileSync(file, sql);
   let res;
   try {
-    res = JSON.parse(execFileSync(DASH, ["--check", file, "--strict", "--json", "--db", dbFile], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
+    res = JSON.parse(execFileSync(DASH, ["--check", path.resolve(file), "--strict", "--json", "--db", dbFile], { cwd: WEB, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
   } catch (e) {
     res = e.stdout ? JSON.parse(e.stdout) : { ok: false, diagnostics: [{ severity: "error", code: "cli", message: String(e.stderr || e) }] };
   }
