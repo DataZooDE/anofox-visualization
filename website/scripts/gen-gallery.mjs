@@ -9,7 +9,8 @@
 //                                          target/debug/dashboard, with web/modules/*/plugin.wasm)
 //                                          and has its pictures
 //   node scripts/gen-gallery.mjs --shots [page,…]   screenshot the tiles in the builder (BUILDER,
-//       default `npm run dev`'s …/next/app/) → src/assets/gallery/<page>/<n>-light|dark.webp
+//       default `npm run dev`'s …/next/app/) → src/assets/gallery/<page>/<n>-light|dark.webp, after
+//       the tile's `| click: <selector>` / `| alt-click: <selector>` steps, in order
 //   node scripts/gen-gallery.mjs --plots   copy the extension plots from a conformance run
 //       (CONFORMANCE_OUT/<ext>/*.svg, default ../../scratch-showcase) → src/assets/plots/<ext>/
 import { execFileSync } from "child_process";
@@ -35,10 +36,10 @@ const pages = readdirSync(src).filter((f) => f.endsWith(".sql")).sort().map((f) 
   const setup = parts[0].split("\n").filter((l) => !/^-- @(page|lead|order) /.test(l)).join("\n").trim();
   const tiles = parts.slice(1).map((p, i) => {
     const [first, ...rest] = p.split("\n");
-    // Title | description [| click: <selector> — clicked before the picture]
+    // Title | description [| click: <selector> | alt-click: <selector> … — clicked in order before the picture]
     const [title, desc = "", ...opts] = first.split(" | ");
-    const click = (opts.find((o) => o.trim().startsWith("click:")) || "").replace(/^\s*click:\s*/, "") || null;
-    return { n: i + 1, title: title.trim(), desc: desc.trim(), click, sql: rest.join("\n").trim() };
+    const steps = opts.map((o) => /^\s*(click|alt-click):\s*(.+?)\s*$/.exec(o)).filter(Boolean).map((m) => ({ alt: m[1] === "alt-click", sel: m[2] }));
+    return { n: i + 1, title: title.trim(), desc: desc.trim(), steps, sql: rest.join("\n").trim() };
   });
   return { slug: f.replace(/\.sql$/, ""), title: head("page"), lead: head("lead"), order: Number(head("order") || 50), setup, tiles };
 });
@@ -108,8 +109,9 @@ if (mode === "--shots") {
         await page.goto(`${builder}?embed=1#sql=${b64(themed(full(p, t)))}`);
         await page.waitForSelector(".dash .panel", { timeout: 120000 });
         await page.waitForFunction(() => !document.body.classList.contains("loading") && !document.querySelector(".dash .panel.dp-skel, .dash .panel.placeholder"), null, { timeout: 120000 });
-        if (t.click) {
-          await page.locator(t.click).first().click();
+        for (const st of t.steps) {
+          // force: a Bayesian network's state labels let the clicks through to the node under them
+          await page.locator(st.sel).first().click({ modifiers: st.alt ? ["Alt"] : [], force: true });
           await page.waitForTimeout(2000);
           await page.waitForFunction(() => !document.querySelector(".dash .panel.dp-skel, .dash .panel.placeholder"), null, { timeout: 120000 });
         }
