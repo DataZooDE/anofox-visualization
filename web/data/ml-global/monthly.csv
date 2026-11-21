@@ -1,0 +1,49 @@
+ds,method,label,units
+2013-05-01,actual,actual,128245.0
+2013-06-01,actual,actual,136580.0
+2013-07-01,actual,actual,141288.0
+2013-08-01,actual,actual,147275.0
+2013-09-01,actual,actual,139731.0
+2013-10-01,actual,actual,132669.0
+2013-11-01,actual,actual,123935.0
+2013-12-01,actual,actual,129475.0
+2014-01-01,actual,actual,123859.0
+2014-02-01,actual,actual,113642.0
+2014-03-01,actual,actual,128947.0
+2014-04-01,actual,actual,132059.0
+2014-05-01,actual,actual,131457.0
+2014-06-01,actual,actual,133238.0
+2014-07-01,actual,actual,140310.0
+2014-08-01,actual,actual,145962.0
+2014-09-01,actual,actual,131924.0
+2014-10-01,actual,actual,137712.0
+2014-11-01,actual,actual,132830.0
+2014-11-01,global_model,one global model (anofox_ml),126473.0
+2014-11-01,local_models,a model per series (anofox_ml),140824.0
+2014-11-01,moving_average,mean of the last 3 months,138915.0
+2014-11-01,seasonal_naive,same month last year,132041.0
+2014-12-01,actual,actual,125991.0
+2014-12-01,global_model,one global model (anofox_ml),126680.0
+2014-12-01,local_models,a model per series (anofox_ml),151577.0
+2014-12-01,moving_average,mean of the last 3 months,138915.0
+2014-12-01,seasonal_naive,same month last year,137316.0
+2015-01-01,actual,actual,129815.0
+2015-01-01,global_model,one global model (anofox_ml),122140.0
+2015-01-01,local_models,a model per series (anofox_ml),136099.0
+2015-01-01,moving_average,mean of the last 3 months,138915.0
+2015-01-01,seasonal_naive,same month last year,130627.0
+2015-02-01,actual,actual,118525.0
+2015-02-01,global_model,one global model (anofox_ml),121931.0
+2015-02-01,local_models,a model per series (anofox_ml),134051.0
+2015-02-01,moving_average,mean of the last 3 months,138915.0
+2015-02-01,seasonal_naive,same month last year,119253.0
+2015-03-01,actual,actual,131789.0
+2015-03-01,global_model,one global model (anofox_ml),131067.0
+2015-03-01,local_models,a model per series (anofox_ml),143845.0
+2015-03-01,moving_average,mean of the last 3 months,138915.0
+2015-03-01,seasonal_naive,same month last year,132812.0
+2015-04-01,actual,actual,134218.0
+2015-04-01,global_model,one global model (anofox_ml),131260.0
+2015-04-01,local_models,a model per series (anofox_ml),143386.0
+2015-04-01,moving_average,mean of the last 3 months,138915.0
+2015-04-01,seasonal_naive,same month last year,135189.0

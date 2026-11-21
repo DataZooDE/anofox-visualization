@@ -1,0 +1,67 @@
+---
+title: "Can one model forecast every item in a store?"
+description: "2,959 items of one Walmart store (M5): one global model learned with anofox_ml against a model per item and the usual rules — backtested on six months."
+---
+
+import shotL from "../../../assets/showcase/ml-global-forecast-light.webp";
+import shotD from "../../../assets/showcase/ml-global-forecast-dark.webp";
+import segL from "../../../assets/showcase/ml-global-forecast-segments-light.webp";
+import segD from "../../../assets/showcase/ml-global-forecast-segments-dark.webp";
+
+A demand planner orders 2,959 items for one Walmart store every month (the [M5](https://www.kaggle.com/competitions/m5-forecasting-accuracy) competition data, store CA_1). A third of the items have been on sale for less than 2½ years, and a fifth sell in fewer than 9 months of 12. **How should each item be forecast?**
+
+<figure class="doc-shot">
+  <img class="lp-light" src={shotL.src} alt="The store's monthly units: what sold against four forecasts for November 2014 to April 2015" />
+  <img class="lp-dark" src={shotD.src} alt="" />
+  <figcaption>The whole store: what sold, and the four forecasts of the six backtest months. <a href="../../app/?dashboard=can-one-model-forecast-every-item-in-a-store">Open it ↗</a></figcaption>
+</figure>
+
+## Three usual answers and one global model
+
+- **The last 3 months** or **the same month last year**: rules per item, in plain SQL.
+- **A model per item**: one anofox_ml model on each item's own history. A short history leaves it little to learn from.
+- **One global model**: a single anofox_ml model learned across all items. The features are each item's recent sales scaled by its own level, the calendar month, the horizon and the category. What one item's history can't show, 2,959 items together can.
+
+## The backtest
+
+The models were fitted on the months up to October 2014 and forecast November 2014 to April 2015, 1–6 months ahead. The settings were fixed before those months were looked at.
+
+| Method | Error (WAPE) | Bias |
+|---|---|---|
+| **One global model** | **37.8 %** | −0.7 % |
+| Mean of the last 3 months | 44.7 % | +9.0 % |
+| Same month last year | 51.9 % | +2.9 % |
+| A model per item | 53.8 % | +11.1 % |
+
+WAPE is the absolute error over all items and months as a share of what sold; lower is better. The global model cuts the error by a sixth against the best rule and by a third against a model per item, and it hardly over- or under-forecasts the store as a whole.
+
+<figure class="doc-shot">
+  <img class="lp-light" src={segL.src} alt="Error by kind of item: new items, items on sale longer, items that sell in few months, and by category" />
+  <img class="lp-dark" src={segD.src} alt="" />
+  <figcaption>Error by kind of item: the global model errs least in every group, and most clearly on new items.</figcaption>
+</figure>
+
+**Where it matters most:** on **new items** a model per item misses by 68 % of what sold and the global model by 38 %. On **items that sell in few months** every method struggles, but the global model still errs least (63 % against 74–84 %).
+
+## How sure: conformal intervals
+
+Each forecast comes with 80 % and 95 % prediction intervals (split conformal). A second, identical model fitted on the months up to April 2014 forecasts May to October 2014. Its errors there, scaled by each item's level and taken per horizon, set the widths, so every item gets an interval as wide as its own level of sales. In the backtest months the 80 % intervals held the actual sales **82.5 %** of the time and the 95 % intervals **95.7 %**, at every horizon from 1 to 6 months.
+
+## How it's built
+
+Each training row is an item at a forecast month with a horizon of 1–6 months. It holds the item's recent sales scaled by its level, and the scaled sales that followed. That gives 319,254 rows. anofox_ml fits one model on all of them and forecasts every item:
+
+```sql
+LOAD anofox_ml;
+CREATE TABLE gm AS
+SELECT ml_fit_agg('LgbmRegressor', target / scale, feats(train),
+                  '{"n_estimators": 400, "learning_rate": 0.05, "num_leaves": 31}') AS m
+FROM train;
+
+SELECT series, ds, greatest(ml_predict((SELECT m FROM gm), feats(t)), 0) * t.scale AS forecast
+FROM test t;
+```
+
+The per-item models use the same features with `ml_fit_predict_by(…, series, …)`. The intervals come from `ml_conformal_margin` on the calibration months. Both fit natively in about ten seconds. The dashboard reads the stored results, so it opens instantly in the browser. The whole pipeline is `scripts/gen-ml-global-case.sh` in the repository.
+
+The dashboard *Can one model forecast every item in a store?* is in the [online demo](../../app/?dashboard=can-one-model-forecast-every-item-in-a-store). Pick an item to see its two years of sales and the four forecasts, or see which features the model leans on.
