@@ -191,8 +191,16 @@ fn table_natural_height(rows: &[(String, Vec<Value>)], roles: &[(usize, Role)]) 
 
 /// A table panel's height on a static page (#1345): all its rows, up to
 /// [`STATIC_TABLE_MAX_PX`] (then its "… n more rows" line).
-pub(crate) fn static_table_height(rows: &[(String, Vec<Value>)], roles: &[(usize, Role)]) -> u32 {
-    table_natural_height(rows, roles)
+pub(crate) fn static_table_height(
+    rows: &[(String, Vec<Value>)],
+    roles: &[(usize, Role)],
+    w: f64,
+) -> u32 {
+    // a title that wraps at this width adds its lines
+    let extra = title_of(rows, roles)
+        .map_or(0, |t| title_lines(&t, w - 24.0).len().saturating_sub(1)) as f64
+        * 18.0;
+    (table_natural_height(rows, roles) + extra)
         .min(STATIC_TABLE_MAX_PX)
         .ceil() as u32
 }
@@ -2064,29 +2072,51 @@ pub(crate) fn fit_title(title: &str, avail_px: f64) -> String {
 const HEAD_LINE: f64 = 13.0;
 
 /// A table header fitted to `avail_px` at its 11 px size (#1345): word-
-/// wrapped onto at most two lines, the second shortened with an ellipsis
+/// wrapped onto at most two lines, the last shortened with an ellipsis
 /// when the rest still doesn't fit — and whether anything was cut.
 fn header_lines(head: &str, avail_px: f64) -> (Vec<String>, bool) {
-    if truncate_header(head, 11.0, avail_px).is_none() {
-        return (vec![head.to_string()], false);
+    wrap_lines(head, 11.0, avail_px, 2)
+}
+
+/// A static page's chart title wrapped to `avail_px` (#1345): at most three
+/// lines of its 14 px bold text, the last shortened with an ellipsis.
+pub(crate) fn title_lines(title: &str, avail_px: f64) -> Vec<String> {
+    wrap_lines(title, 14.0, avail_px, 3).0
+}
+
+/// `text` word-wrapped onto at most `max` lines `avail_px` wide at `size`,
+/// the last shortened with an ellipsis when the rest doesn't fit (a word
+/// wider than a line is shortened too) — and whether anything was cut.
+fn wrap_lines(text: &str, size: f64, avail_px: f64, max: usize) -> (Vec<String>, bool) {
+    let fits = |s: &str| truncate_header(s, size, avail_px).is_none();
+    let words: Vec<&str> = text.split_whitespace().collect();
+    let mut lines = Vec::new();
+    let mut at = 0;
+    while at < words.len() {
+        let rest = words[at..].join(" ");
+        if lines.len() + 1 == max || fits(&rest) {
+            let cut = truncate_header(&rest, size, avail_px);
+            let was_cut = cut.is_some();
+            lines.push(cut.unwrap_or(rest));
+            return (lines, was_cut);
+        }
+        // the longest run of words that fits this line (at least one)
+        let n = (1..=words.len() - at)
+            .take_while(|&n| fits(&words[at..at + n].join(" ")))
+            .last()
+            .unwrap_or(0);
+        if n == 0 {
+            let one = truncate_header(words[at], size, avail_px).unwrap_or_default();
+            lines.push(one);
+            return (lines, true);
+        }
+        lines.push(words[at..at + n].join(" "));
+        at += n;
     }
-    let fits = |s: &str| truncate_header(s, 11.0, avail_px).is_none();
-    let words: Vec<&str> = head.split_whitespace().collect();
-    // the longest run of words that fits the first line (at least one)
-    let n = (1..=words.len())
-        .take_while(|&n| fits(&words[..n].join(" ")))
-        .last()
-        .unwrap_or(0);
-    if n == 0 || n == words.len() {
-        let short = truncate_header(head, 11.0, avail_px).unwrap_or_default();
-        return (vec![short], true);
+    if lines.is_empty() {
+        lines.push(text.to_string());
     }
-    let rest = words[n..].join(" ");
-    let (second, cut) = match truncate_header(&rest, 11.0, avail_px) {
-        Some(short) => (short, true),
-        None => (rest, false),
-    };
-    (vec![words[..n].join(" "), second], cut)
+    (lines, false)
 }
 
 fn truncate_header(head: &str, size: f64, avail_px: f64) -> Option<String> {
@@ -2376,7 +2406,11 @@ fn table_svg(
         0.0
     };
     let subtitle = subtitle_of(rows, roles);
+    // #1345: a long title wraps (up to three lines) instead of being cut
+    let title_lines = title.map_or_else(Vec::new, |t| title_lines(t, w - 24.0));
+    let title_extra = 18.0 * title_lines.len().saturating_sub(1) as f64;
     let top = if title.is_some() { 30.0 } else { 10.0 }
+        + title_extra
         + if subtitle.is_some() { SUBTITLE_H } else { 0.0 }
         + head_extra;
     // #457: a nested sparkline/sparkbar panel can't be asked for less than
@@ -2404,15 +2438,18 @@ fn table_svg(
         "<g font-family=\"{}\" font-size=\"12\">",
         esc(&th.font.family)
     ));
-    if let Some(t) = title {
+    for (i, t) in title_lines.iter().enumerate() {
         s.push_str(&format!(
-            "<text x=\"12\" y=\"20\" font-size=\"14\" font-weight=\"700\" fill=\"{}\">{}</text>",
+            "<text x=\"12\" y=\"{y:.0}\" font-size=\"14\" font-weight=\"700\" fill=\"{}\">{}</text>",
             hex(th.colors.heading),
-            esc(&fit_title(t, w - 24.0))
+            esc(t),
+            y = 20.0 + 18.0 * i as f64,
         ));
     }
     if let Some(sb) = &subtitle {
+        s.push_str(&format!("<g transform=\"translate(0,{title_extra:.0})\">"));
         s.push_str(&subtitle_svg(sb, 12.0, w, ropts));
+        s.push_str("</g>");
     }
     for (k, (lines, cut)) in heads.iter().enumerate() {
         let (x, a) = anchor(k);

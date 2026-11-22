@@ -85,6 +85,69 @@ pub const SPAN_GRID_PX: f64 = 1376.0;
 /// The grid's gap (1.15rem).
 const SPAN_GAP_PX: f64 = 18.4;
 
+/// A phone's panel width on a static page (#1345): a 390 px screen less the
+/// page's and the card's padding there (`web/theme-base.css`).
+pub const PHONE_PX: u32 = 316;
+
+/// A panel's phone drawing (#1345): [`PHONE_PX`] wide, or — a table whose
+/// cells would be cut there — the narrowest of a few wider widths that cuts
+/// none (up to 840 px), which the page then scrolls sideways in its card,
+/// as the app does with a wide table on a phone.
+pub fn phone_drawing(draw: impl Fn(u32, u32) -> String, h: u32) -> String {
+    let cut = |svg: &str| svg.contains("\u{2026}<title>");
+    let mut svg = draw(PHONE_PX, h);
+    for w in [420, 540, 680, 840] {
+        if !cut(&svg) {
+            break;
+        }
+        svg = draw(w, h);
+    }
+    svg
+}
+
+/// A panel's drawing with its phone-width drawing next to it (#1345): the
+/// page shows `svg.dp-wide` and, on a narrow screen, `svg.dp-narrow`
+/// instead. Without a phone drawing (or when either isn't an `<svg>`, e.g.
+/// an error) the panel keeps its one drawing.
+pub fn with_phone(wide: String, narrow: Option<String>) -> String {
+    // every top-level <svg> (a title bar is one of its own), not a nested one
+    let mark = |svg: &str, class: &str| {
+        let mut out = String::with_capacity(svg.len() + 64);
+        let (mut depth, mut rest) = (0usize, svg);
+        while let Some(i) = rest
+            .find("<svg")
+            .into_iter()
+            .chain(rest.find("</svg>"))
+            .min()
+        {
+            out.push_str(&rest[..i]);
+            rest = &rest[i..];
+            if let Some(r) = rest.strip_prefix("</svg>") {
+                depth = depth.saturating_sub(1);
+                out.push_str("</svg>");
+                rest = r;
+            } else {
+                if depth == 0 && rest.starts_with("<svg ") {
+                    out.push_str(&format!("<svg class=\"{class}\""));
+                    rest = &rest[4..];
+                } else {
+                    out.push_str("<svg");
+                    rest = &rest[4..];
+                }
+                depth += 1;
+            }
+        }
+        out.push_str(rest);
+        out
+    };
+    match narrow {
+        Some(n) if wide.starts_with("<svg ") && n.starts_with("<svg ") => {
+            format!("{}{}", mark(&wide, "dp-wide"), mark(&n, "dp-narrow"))
+        }
+        _ => wide,
+    }
+}
+
 /// A panel's place on a static page (#1292): the `::SPAN` (of 12 columns)
 /// and `::HEIGHT` statements right before it, as the browser and
 /// `dashboard --svg` read them. Both apply to the next panel only.
@@ -925,6 +988,21 @@ mod slot_tests {
         s.read(&[(0, Role::Span)], one("wide"));
         assert_eq!(s, Slot::default());
         assert!(!s.read(&[(0, Role::Title)], one("x")));
+    }
+
+    /// #1345: every top-level drawing gets its class, a nested one not.
+    #[test]
+    fn a_phone_drawing_marks_each_top_level_svg() {
+        let two = "<svg a><text/></svg><svg b><svg c></svg></svg>".to_string();
+        assert_eq!(
+            with_phone(two.clone(), Some("<svg n></svg>".into())),
+            "<svg class=\"dp-wide\" a><text/></svg><svg class=\"dp-wide\" b><svg c></svg></svg><svg class=\"dp-narrow\" n></svg>"
+        );
+        assert_eq!(
+            with_phone("<pre>e</pre>".into(), Some("<svg n></svg>".into())),
+            "<pre>e</pre>"
+        );
+        assert_eq!(with_phone(two.clone(), None), two);
     }
 
     fn one(v: &str) -> impl Fn(usize) -> Option<String> + '_ {

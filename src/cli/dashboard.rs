@@ -1053,6 +1053,11 @@ fn render_dashboard_html(
     };
     // a page with any ::SPAN lays its panels on the 12-column grid (#1345)
     let spans = queried.iter().any(|(.., slot)| slot.span.is_some());
+    // #1345: each panel also drawn at phone width, unless the page fits its
+    // panels to the window (its layout needs the drawing as the card's last
+    // child)
+    let fit = page::static_fit(&sql::plan(script));
+    let phone = !fit;
     let mut queried = queried.into_iter().peekable();
     let mut in_tab = false;
     while let Some((p, rows, compact, static_html, slot)) = queried.next() {
@@ -1129,8 +1134,15 @@ fn render_dashboard_html(
         }
         // A contract plot call: one figure per result row (GROUP BY key).
         if let Some(cp) = &p.contract {
+            let narrow = if phone {
+                sql::contract_call::render_rows_opts(cp, &rows, page::PHONE_PX, ph, &opts)
+            } else {
+                Vec::new()
+            };
+            let mut narrow = narrow.into_iter();
             for (_, r) in sql::contract_call::render_rows_opts(cp, &rows, pw, ph, &opts) {
-                let svg = r.unwrap_or_else(|e| error_pre(&format!("error: {e}")));
+                let wide = r.unwrap_or_else(|e| error_pre(&format!("error: {e}")));
+                let svg = page::with_phone(wide, narrow.next().and_then(|(_, r)| r.ok()));
                 panels.push_str(&format!("<figure class=\"panel{span}\">{svg}</figure>"));
                 n += 1;
             }
@@ -1244,35 +1256,39 @@ fn render_dashboard_html(
         let md_html = is_md
             .then(|| dashboard::markdown_panel_html(&rows, &p.roles, fold.as_deref(), &opts))
             .flatten();
-        let svg = if let Some(html) = md_html {
-            html
-        } else if p
-            .roles
-            .iter()
-            .any(|(_, r)| matches!(r, Role::Table | Role::Record | Role::PagedTable))
-        {
-            let named_rows = sql::result_columns(&rows);
-            // #1345: all its rows (up to a cap) unless its ::HEIGHT says
-            let ph = match slot.height {
-                Some(_) => ph,
-                None => dashboard::static_table_height(&named_rows, &p.roles),
-            };
-            dashboard::render_panel_doc_svg(
-                &named_rows,
-                &p.roles,
-                &p.names,
-                pw as f64,
-                ph as f64,
-                &opts,
-                false,
-                &tracks,
-                None,
-                compact,
-            )
-        } else {
-            // Its ::TITLE bar, as on a dashboard card (#232).
-            render_with_title(&cols, &tracks, pw, ph, &opts)
-                .unwrap_or_else(|e| error_pre(&format!("error: {e}")))
+        // the panel drawn at `w` wide (`h` high, a table all its rows)
+        let draw = |w: u32, h: u32| {
+            if p.roles
+                .iter()
+                .any(|(_, r)| matches!(r, Role::Table | Role::Record | Role::PagedTable))
+            {
+                let named_rows = sql::result_columns(&rows);
+                // #1345: all its rows (up to a cap) unless its ::HEIGHT says
+                let h = match slot.height {
+                    Some(_) => h,
+                    None => dashboard::static_table_height(&named_rows, &p.roles, w as f64),
+                };
+                dashboard::render_panel_doc_svg(
+                    &named_rows,
+                    &p.roles,
+                    &p.names,
+                    w as f64,
+                    h as f64,
+                    &opts,
+                    false,
+                    &tracks,
+                    None,
+                    compact,
+                )
+            } else {
+                // Its ::TITLE bar, as on a dashboard card (#232).
+                render_with_title(&cols, &tracks, w, h, &opts)
+                    .unwrap_or_else(|e| error_pre(&format!("error: {e}")))
+            }
+        };
+        let svg = match md_html {
+            Some(html) => html,
+            None => page::with_phone(draw(pw, ph), phone.then(|| page::phone_drawing(draw, ph))),
         };
         let (class, icon_attrs) = if is_md {
             let (class, attrs) = roles::markdown_figure_attrs(
@@ -1313,7 +1329,7 @@ fn render_dashboard_html(
         head_extra: String::new(),
         controls_html: String::new(),
         panels_html: panels,
-        fit: page::static_fit(&sql::plan(script)),
+        fit,
     });
     (html, n)
 }

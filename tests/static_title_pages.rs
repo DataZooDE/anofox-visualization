@@ -91,7 +91,22 @@ fn figures(html: &str) -> Vec<String> {
         .collect()
 }
 
+/// The page's desktop drawings only (#1345): the `dashboard` CLI also draws
+/// each panel at phone width (`svg.dp-narrow`), the served page does not.
+fn desktop(html: &str) -> String {
+    let mut out = String::new();
+    let mut rest = html;
+    while let Some(i) = rest.find("<svg class=\"dp-narrow\"") {
+        out.push_str(&rest[..i]);
+        let after = &rest[i..];
+        rest = &after[after.find("</svg>").expect("closed svg") + 6..];
+    }
+    out.push_str(rest);
+    out.replace("<svg class=\"dp-wide\" ", "<svg ")
+}
+
 fn check_page(html: &str) {
+    let html = &desktop(html);
     // The hostile title closes nothing and opens no script.
     assert!(!html.contains("<script>alert"), "{html}");
     assert_eq!(html.matches("</figure>").count(), 4, "{html}");
@@ -166,7 +181,10 @@ fn dashboard_cli_html_draws_title_bars() {
         "{}",
         String::from_utf8_lossy(&run.stderr)
     );
-    check_page(&std::fs::read_to_string(&out).unwrap());
+    let html = std::fs::read_to_string(&out).unwrap();
+    // each chart also has its phone drawing, title bar included
+    assert!(html.contains("<svg class=\"dp-narrow\" xmlns=\"http://www.w3.org/2000/svg\" width=\"316\" height=\"26\""), "{html}");
+    check_page(&html);
 }
 
 #[cfg(feature = "serve")]
