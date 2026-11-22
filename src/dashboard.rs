@@ -2912,26 +2912,52 @@ pub fn caption_html(
         return None;
     }
     let cols = crate::sql::result_columns(rows);
-    let text = markdown_fill(&caption_text(&cols, roles)?, &cols, &o.locale);
-    // plain text, as the static ::MARKDOWN boxes draw it (no wrapping here:
-    // the page's CSS wraps); an empty line ends a paragraph
-    let mut paras = String::new();
-    let mut cur: Vec<String> = Vec::new();
-    let flush = |cur: &mut Vec<String>, paras: &mut String| {
-        if !cur.is_empty() {
-            paras.push_str(&format!("<p>{}</p>", cur.join(" ")));
-            cur.clear();
-        }
+    let html = markdown_html(&caption_text(&cols, roles)?, &cols, o);
+    Some(format!("<div class=\"dp-caption md-body\">{html}</div>"))
+}
+
+/// A ::MARKDOWN text as HTML for a static page (#1345): the browser's own
+/// rendering (`crate::markdown_html`), its `{{values}}` filled from `rows`,
+/// a formula as readable text, an image inlined from the dashboard's
+/// `assets/` (or a `data:` URI) — never fetched from elsewhere, so an
+/// `https:` image shows its alt text.
+pub fn markdown_html(md: &str, rows: &[(String, Vec<Value>)], o: &RenderOptions) -> String {
+    let mut budget = MD_IMAGE_BUDGET_BYTES;
+    let root = o.asset_root.as_deref();
+    let mut image = |src: &str| md_image(src, root, &mut budget).map(|(href, _)| href);
+    let mut mo = crate::markdown_html::Opts {
+        breaks: false,
+        tex_text: true,
+        image: &mut image,
     };
-    for line in markdown_lines(&text, 1e9) {
-        match line {
-            MdLine::Text(t) if t.is_empty() => flush(&mut cur, &mut paras),
-            MdLine::Text(t) => cur.push(esc(&t)),
-            MdLine::Image { .. } => {}
-        }
-    }
-    flush(&mut cur, &mut paras);
-    Some(format!("<div class=\"dp-caption\">{paras}</div>"))
+    crate::markdown_html::render_with_values(md, rows, &o.locale, &mut mo)
+}
+
+/// A ::MARKDOWN panel's content for a static page (#1345), if it is one:
+/// its ::TITLE bar and its text as HTML (`markdown_html`) — a 'details'
+/// ::MARKDOWN_TONE folds it, open, under its label (`fold`).
+pub fn markdown_panel_html(
+    rows: &[serde_json::Map<String, serde_json::Value>],
+    roles: &[(usize, Role)],
+    fold: Option<&str>,
+    o: &RenderOptions,
+) -> Option<String> {
+    let cols = crate::sql::result_columns(rows);
+    let md = markdown_text(&cols, roles)?;
+    let title = title_of(&cols, roles)
+        .map(|t| format!("<figcaption class=\"panel-title\">{}</figcaption>", esc(&t)))
+        .unwrap_or_default();
+    let body = format!(
+        "<div class=\"md-body\">{}</div>",
+        markdown_html(&md, &cols, o)
+    );
+    Some(match fold {
+        Some(label) => format!(
+            "{title}<details class=\"md-details\" open><summary>{}</summary>{body}</details>",
+            esc(label)
+        ),
+        None => format!("{title}{body}"),
+    })
 }
 
 /// Caption text size and line height (smaller than a ::MARKDOWN box's 13 px
@@ -3075,6 +3101,18 @@ fn panel_chrome(
 /// `{{…}}` placeholder (a `$…$` TeX formula, `**bold**`, …), is left exactly
 /// as written for `markdown_lines` below to handle (#327).
 pub(crate) fn markdown_fill(md: &str, rows: &[(String, Vec<Value>)], l: &Locale) -> String {
+    markdown_fill_with(md, rows, l, &mut |v| v)
+}
+
+/// [`markdown_fill`], with each filled value passed through `put` (the
+/// static HTML export puts an inert token in its place, filled in after the
+/// Markdown is rendered — `crate::markdown_html::render_with_values`).
+pub(crate) fn markdown_fill_with(
+    md: &str,
+    rows: &[(String, Vec<Value>)],
+    l: &Locale,
+    put: &mut dyn FnMut(String) -> String,
+) -> String {
     let keys: Vec<&String> = rows.iter().map(|(n, _)| n).collect();
     let mut out = String::new();
     let mut rest = md;
@@ -3105,7 +3143,7 @@ pub(crate) fn markdown_fill(md: &str, rows: &[(String, Vec<Value>)], l: &Locale)
             .and_then(|(_, vs)| vs.first())
             .map(|v| md_format_value(v, spec, l));
         match filled {
-            Some(text) => out.push_str(&text),
+            Some(text) => out.push_str(&put(text)),
             None => {
                 out.push_str("{{");
                 out.push_str(inner);

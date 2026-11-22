@@ -48,6 +48,7 @@ pub mod kpi;
 pub mod lint;
 pub mod macros;
 pub(crate) mod map;
+pub mod markdown_html;
 pub mod math;
 #[doc(hidden)]
 pub mod module;

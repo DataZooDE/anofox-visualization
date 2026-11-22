@@ -1209,7 +1209,42 @@ fn render_dashboard_html(
         // see most of its columns — the same raw, name-keyed rows `--svg`
         // and `serve` already read instead, through the shared table
         // renderer (`dashboard::render_panel_doc_svg`).
-        let svg = if p
+        // #536: a ::MARKDOWN panel's chrome — same resolution as the
+        // browser's resolveMdChrome(), drawn through the same CSS classes
+        // (web/theme-base.css, embedded in this page by `page::render`).
+        let text_of = |role: Role| -> Option<String> {
+            let (i, _) = p.roles.iter().find(|(_, r)| *r == role)?;
+            rows.first()?
+                .get(&format!("c{i}"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        };
+        let is_md = p.roles.iter().any(|(_, r)| matches!(r, Role::Markdown));
+        let callout = p
+            .roles
+            .iter()
+            .any(|(_, r)| matches!(r, Role::Callout))
+            .then(|| text_of(Role::Callout).unwrap_or_default());
+        let md_chrome = |default: Option<&str>| {
+            roles::resolve_markdown_chrome(
+                text_of(Role::MarkdownStyle).as_deref(),
+                callout.is_some(),
+                text_of(Role::MarkdownTone).as_deref(),
+                default,
+            )
+        };
+        // a 'details' tone (#691) folds the text under its label, shown open
+        let fold = match md_chrome(md_default.as_deref()).1 {
+            Some(("details", label)) => Some(label.unwrap_or_else(|| "Details".into())),
+            _ => None,
+        };
+        // #1345: a ::MARKDOWN text as HTML, by the browser's own rules
+        let md_html = is_md
+            .then(|| dashboard::markdown_panel_html(&rows, &p.roles, fold.as_deref(), &opts))
+            .flatten();
+        let svg = if let Some(html) = md_html {
+            html
+        } else if p
             .roles
             .iter()
             .any(|(_, r)| matches!(r, Role::Table | Role::Record | Role::PagedTable))
@@ -1232,28 +1267,15 @@ fn render_dashboard_html(
             render_with_title(&cols, &tracks, pw, ph, &opts)
                 .unwrap_or_else(|e| error_pre(&format!("error: {e}")))
         };
-        // #536: a ::MARKDOWN panel's chrome — same resolution as the
-        // browser's resolveMdChrome(), drawn through the same CSS classes
-        // (web/theme-base.css, embedded in this page by `page::render`).
-        let text_of = |role: Role| -> Option<String> {
-            let (i, _) = p.roles.iter().find(|(_, r)| *r == role)?;
-            rows.first()?
-                .get(&format!("c{i}"))
-                .and_then(|v| v.as_str())
-                .map(str::to_string)
-        };
-        let (class, icon_attrs) = if p.roles.iter().any(|(_, r)| matches!(r, Role::Markdown)) {
-            let callout = p
-                .roles
-                .iter()
-                .any(|(_, r)| matches!(r, Role::Callout))
-                .then(|| text_of(Role::Callout).unwrap_or_default());
-            roles::markdown_figure_attrs(
+        let (class, icon_attrs) = if is_md {
+            let (class, attrs) = roles::markdown_figure_attrs(
                 text_of(Role::MarkdownStyle).as_deref(),
                 callout.as_deref(),
                 text_of(Role::MarkdownTone).as_deref(),
                 md_default.as_deref(),
-            )
+            );
+            // a folded text's label is its <summary>, not a tone label
+            (class, if fold.is_some() { String::new() } else { attrs })
         } else {
             ("panel".to_string(), String::new())
         };
