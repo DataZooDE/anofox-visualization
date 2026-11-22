@@ -79,6 +79,12 @@ pub struct StaticPage<'a> {
     pub fit: bool,
 }
 
+/// The static page's 12-column grid width (#1345): a 1440 px window less
+/// the page's padding; `web/theme-base.css` caps `.grid.dp-spans` at it.
+pub const SPAN_GRID_PX: f64 = 1376.0;
+/// The grid's gap (1.15rem).
+const SPAN_GAP_PX: f64 = 18.4;
+
 /// A panel's place on a static page (#1292): the `::SPAN` (of 12 columns)
 /// and `::HEIGHT` statements right before it, as the browser and
 /// `dashboard --svg` read them. Both apply to the next panel only.
@@ -136,12 +142,23 @@ impl Slot {
         )
     }
 
-    /// The drawing size: 460 × 300 as before for a panel without either;
-    /// a span widens it in steps of a twelfth of a two-panel row (6 = 460,
-    /// 12 = 928), a height sets the height (a share of the window as of a
+    /// The drawing size: 460 × 300 as before for a panel without either
+    /// on a page without spans. On a page with spans (`spans`) a panel is
+    /// drawn at the width it gets on the static page's 12-column grid
+    /// (#1345: `SPAN_GRID_PX` wide, its 18.4 px gaps, a card's 42 px of
+    /// padding and border), so it shows at its own size there instead of
+    /// scaled up; one without a span takes 6 columns, as the page's CSS
+    /// places it. A height sets the height (a share of the window as of a
     /// 900 px high one).
-    pub fn size(&self) -> (u32, u32) {
-        let w = self.span.map_or(460, |s| 78 * s.clamp(1, 12) - 8);
+    pub fn size(&self, spans: bool) -> (u32, u32) {
+        let w = match (self.span, spans) {
+            (None, false) => 460,
+            (s, _) => {
+                let s = s.unwrap_or(6).clamp(1, 12) as f64;
+                let col = (SPAN_GRID_PX - 11.0 * SPAN_GAP_PX) / 12.0;
+                (s * col + (s - 1.0) * SPAN_GAP_PX - 42.0).round() as u32
+            }
+        };
         let h = self.height.map_or(300, |h| {
             h.px(w as f64, 900.0)
                 .clamp(crate::height::MIN_PX, crate::height::MAX_PX)
@@ -884,24 +901,26 @@ mod slot_tests {
     use crate::Role;
 
     /// #1292: a ::SPAN / ::HEIGHT statement sizes the next panel; nothing
-    /// set keeps the old 460 × 300.
+    /// set on a page without spans keeps the old 460 × 300.
     #[test]
     fn span_and_height_size_the_panel() {
         let mut s = Slot::default();
-        assert_eq!(s.size(), (460, 300));
+        assert_eq!(s.size(false), (460, 300));
+        // #1345: on a page with spans, drawn at its width on the grid
+        assert_eq!(s.size(true), (637, 300));
         assert_eq!(s.class(), "");
         assert!(s.read(&[(0, Role::Span)], one("12")));
         assert!(s.read(&[(0, Role::Height)], one("680")));
-        assert_eq!(s.size(), (928, 680));
+        assert_eq!(s.size(true), (1334, 680));
         assert_eq!(s.class(), " dp-span-12");
         let mut s = Slot::default();
         s.read(&[(0, Role::Span)], one("6"));
-        assert_eq!(s.size(), (460, 300));
+        assert_eq!(s.size(true), (637, 300));
         // a ratio of the width; out-of-range spans clamp; junk is ignored
         let mut s = Slot::default();
         s.read(&[(0, Role::Span)], one("40"));
         s.height = Some(PanelHeight::Ratio(0.5));
-        assert_eq!(s.size(), (928, 464));
+        assert_eq!(s.size(true), (1334, 667));
         let mut s = Slot::default();
         s.read(&[(0, Role::Span)], one("wide"));
         assert_eq!(s, Slot::default());
@@ -919,7 +938,7 @@ mod slot_tests {
         let roles = [(0, Role::Span), (1, Role::Height)];
         assert!(Slot::is_layout(&roles));
         assert!(s.read(&roles, |i| Some(["12", "680"][i].to_string())));
-        assert_eq!(s.size(), (928, 680));
+        assert_eq!(s.size(true), (1334, 680));
         assert!(!Slot::is_layout(&[(0, Role::Span), (1, Role::Title)]));
         assert_eq!(
             Slot::query(&roles, "SELECT 6, 6;"),

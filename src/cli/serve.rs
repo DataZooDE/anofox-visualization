@@ -3405,10 +3405,12 @@ fn render_dashboard_page(
         let shown: Vec<&sql::Panel> = queried.iter().map(|(p, ..)| p).collect();
         sql::steps::StaticSteps::new(&shown)
     };
+    // a page with any ::SPAN lays its panels on the 12-column grid (#1345)
+    let spans = slots.values().any(|s| s.span.is_some());
     let mut queried = queried_at.into_iter().zip(queried).peekable();
     while let Some((at, (panel, rows, na, compact, static_html))) = queried.next() {
         let slot = slots.get(&at).copied().unwrap_or_default();
-        let (pw, ph) = slot.size();
+        let (pw, ph) = slot.size(spans);
         let span = slot.class();
         if let Some(html) = static_html {
             panels.push_str(&html);

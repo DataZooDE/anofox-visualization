@@ -180,8 +180,25 @@ fn table_natural_height(rows: &[(String, Vec<Value>)], roles: &[(usize, Role)]) 
     } else {
         0.0
     };
-    (top + 30.0 + nrow * row_h + row_h + 6.0).max(80.0)
+    // a header past its 14 counted characters may wrap onto a second line
+    let head = if rows.iter().any(|(n, _)| n.chars().count() > 14) {
+        HEAD_LINE
+    } else {
+        0.0
+    };
+    (top + head + 30.0 + nrow * row_h + row_h + 6.0).max(80.0)
 }
+
+/// A table panel's height on a static page (#1345): all its rows, up to
+/// [`STATIC_TABLE_MAX_PX`] (then its "… n more rows" line).
+pub(crate) fn static_table_height(rows: &[(String, Vec<Value>)], roles: &[(usize, Role)]) -> u32 {
+    table_natural_height(rows, roles)
+        .min(STATIC_TABLE_MAX_PX)
+        .ceil() as u32
+}
+
+/// About 60 plain rows: a static page is read, not scrolled through.
+const STATIC_TABLE_MAX_PX: f64 = 1400.0;
 
 /// #774: the `::SUBTITLE` line under a title bar (baseline 36), muted and
 /// shortened with an ellipsis to the panel's width.
@@ -2043,6 +2060,35 @@ pub(crate) fn fit_title(title: &str, avail_px: f64) -> String {
     truncate_header(title, 14.0, avail_px).unwrap_or_else(|| title.to_string())
 }
 
+/// A table header's line height when it wraps (#1345).
+const HEAD_LINE: f64 = 13.0;
+
+/// A table header fitted to `avail_px` at its 11 px size (#1345): word-
+/// wrapped onto at most two lines, the second shortened with an ellipsis
+/// when the rest still doesn't fit — and whether anything was cut.
+fn header_lines(head: &str, avail_px: f64) -> (Vec<String>, bool) {
+    if truncate_header(head, 11.0, avail_px).is_none() {
+        return (vec![head.to_string()], false);
+    }
+    let fits = |s: &str| truncate_header(s, 11.0, avail_px).is_none();
+    let words: Vec<&str> = head.split_whitespace().collect();
+    // the longest run of words that fits the first line (at least one)
+    let n = (1..=words.len())
+        .take_while(|&n| fits(&words[..n].join(" ")))
+        .last()
+        .unwrap_or(0);
+    if n == 0 || n == words.len() {
+        let short = truncate_header(head, 11.0, avail_px).unwrap_or_default();
+        return (vec![short], true);
+    }
+    let rest = words[n..].join(" ");
+    let (second, cut) = match truncate_header(&rest, 11.0, avail_px) {
+        Some(short) => (short, true),
+        None => (rest, false),
+    };
+    (vec![words[..n].join(" "), second], cut)
+}
+
 fn truncate_header(head: &str, size: f64, avail_px: f64) -> Option<String> {
     let fits = |s: &str| ggplot_rs::render::text::text_width(s, size) * 1.08 <= avail_px;
     if fits(head) {
@@ -2308,9 +2354,31 @@ fn table_svg(
         }
     };
 
+    // header — a header wider than its own column wraps onto a second
+    // line (#1345), then is shortened to an ellipsis instead of overlapping
+    // the next one (#351); the full text is still there on hover, via
+    // `<title>` (only when actually shortened). The column's own natural
+    // width (`nat`) already hugs its header/cell text with only a little
+    // padding, so fitting right up to that same width would still leave
+    // adjacent headers touching edge to edge — an explicit gutter (one
+    // text-size's worth) keeps a visible gap, on either side, whichever
+    // side a right-aligned (numeric) header grows into.
+    let gutter = 11.0;
+    let heads: Vec<(Vec<String>, bool)> = cols
+        .iter()
+        .enumerate()
+        .map(|(k, c)| header_lines(&c.p.head, (widths[k] - gutter).max(10.0)))
+        .collect();
+    // a two-line header makes the header band one line taller
+    let head_extra = if heads.iter().any(|(l, _)| l.len() > 1) {
+        HEAD_LINE
+    } else {
+        0.0
+    };
     let subtitle = subtitle_of(rows, roles);
     let top = if title.is_some() { 30.0 } else { 10.0 }
-        + if subtitle.is_some() { SUBTITLE_H } else { 0.0 };
+        + if subtitle.is_some() { SUBTITLE_H } else { 0.0 }
+        + head_extra;
     // #457: a nested sparkline/sparkbar panel can't be asked for less than
     // `SPARKLINE_MIN_H` (50px, see its doc comment on ggplot-rs's own
     // layout floor) without clipping the line's low points (or, for
@@ -2346,31 +2414,21 @@ fn table_svg(
     if let Some(sb) = &subtitle {
         s.push_str(&subtitle_svg(sb, 12.0, w, ropts));
     }
-    // header — a header wider than its own column is shortened to an
-    // ellipsis instead of overlapping the next one (#351); the full text is
-    // still there on hover, via `<title>` (only when actually shortened, so
-    // a dashboard with no long headers renders byte-identical to before).
-    // The column's own natural width (`nat`) already hugs its header/cell
-    // text with only a little padding, so truncating right up to that same
-    // width would still leave adjacent headers touching edge to edge — an
-    // explicit gutter (one text-size's worth) keeps a visible gap, on
-    // either side, whichever side a right-aligned (numeric) header grows
-    // into.
-    let gutter = 11.0;
-    for (k, c) in cols.iter().enumerate() {
+    for (k, (lines, cut)) in heads.iter().enumerate() {
         let (x, a) = anchor(k);
-        let avail = (widths[k] - gutter).max(10.0);
-        let short = truncate_header(&c.p.head, 11.0, avail);
-        let shown = short.as_deref().unwrap_or(&c.p.head);
-        let title = match &short {
-            Some(_) => format!("<title>{}</title>", esc(&c.p.head)),
-            None => String::new(),
+        let title = if *cut {
+            format!("<title>{}</title>", esc(&cols[k].p.head))
+        } else {
+            String::new()
         };
-        s.push_str(&format!(
-            "<text x=\"{x:.1}\" y=\"{y:.0}\" text-anchor=\"{a}\" font-size=\"11\" font-weight=\"600\" fill=\"{muted}\">{}{title}</text>",
-            esc(shown),
-            y = top + 16.0
-        ));
+        // bottom-aligned: a one-line header sits on the last line
+        for (i, line) in lines.iter().enumerate() {
+            let y = top + 16.0 - (lines.len() - 1 - i) as f64 * HEAD_LINE;
+            s.push_str(&format!(
+                "<text x=\"{x:.1}\" y=\"{y:.0}\" text-anchor=\"{a}\" font-size=\"11\" font-weight=\"600\" fill=\"{muted}\">{}{title}</text>",
+                esc(line),
+            ));
+        }
     }
     s.push_str(&format!(
         "<line x1=\"12\" y1=\"{ly:.0}\" x2=\"{x2:.0}\" y2=\"{ly:.0}\" stroke=\"{muted}\" stroke-width=\"1.5\"/>",

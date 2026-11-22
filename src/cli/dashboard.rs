@@ -1051,10 +1051,12 @@ fn render_dashboard_html(
         let shown: Vec<&sql::Panel> = queried.iter().map(|(p, ..)| p).collect();
         sql::steps::StaticSteps::new(&shown)
     };
+    // a page with any ::SPAN lays its panels on the 12-column grid (#1345)
+    let spans = queried.iter().any(|(.., slot)| slot.span.is_some());
     let mut queried = queried.into_iter().peekable();
     let mut in_tab = false;
     while let Some((p, rows, compact, static_html, slot)) = queried.next() {
-        let (pw, ph) = slot.size();
+        let (pw, ph) = slot.size(spans);
         let span = slot.class();
         if let Some(html) = static_html {
             // a tab's marker (#1345): opens its section, a sub-tab's a heading
@@ -1250,6 +1252,11 @@ fn render_dashboard_html(
             .any(|(_, r)| matches!(r, Role::Table | Role::Record | Role::PagedTable))
         {
             let named_rows = sql::result_columns(&rows);
+            // #1345: all its rows (up to a cap) unless its ::HEIGHT says
+            let ph = match slot.height {
+                Some(_) => ph,
+                None => dashboard::static_table_height(&named_rows, &p.roles),
+            };
             dashboard::render_panel_doc_svg(
                 &named_rows,
                 &p.roles,
