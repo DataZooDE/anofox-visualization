@@ -9,7 +9,7 @@
 # M5_DIR holds the competition's CSVs: calendar.csv, sell_prices.csv,
 # sales_train_evaluation.csv and sales_test_evaluation.csv (the labels of the
 # test days). Needs DuckDB 1.5.6 with anofox_ml, anofox_forecast and
-# anofox_statistics (INSTALL … FROM community). About 2½ hours on 16 cores,
+# anofox_statistics (INSTALL … FROM community). About 4½ hours on 16 cores,
 # ~25 GB of memory and ~40 GB of disk for the work database.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -31,6 +31,11 @@ run -c "CREATE OR REPLACE TABLE tree_fc (cutoff INT, seed INT, id VARCHAR, t INT
         CREATE OR REPLACE TABLE models (cutoff INT, seed INT, m BLOB);"
 for c in 1913 1941; do
   for s in 7 8 9 10 11; do run -c "SET VARIABLE cutoff = $c; SET VARIABLE seed = $s;" -c ".read model.sql"; done
+done
+# the comparison: LightGBM with the M5 winner's parameters, three seeds
+run -c "CREATE OR REPLACE TABLE lgbm_fc (cutoff INT, seed INT, id VARCHAR, t INT, h INT, f DOUBLE);"
+for c in 1913 1941; do
+  for s in 1995 1996 1997; do run -c "SET VARIABLE cutoff = $c; SET VARIABLE seed = $s;" -c ".read lgbm.sql"; done
 done
 run -c ".read pf.sql"
 run -c ".read assess.sql"

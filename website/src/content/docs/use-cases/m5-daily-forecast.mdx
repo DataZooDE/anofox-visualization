@@ -28,10 +28,11 @@ The models train on days 1 to 1941 (January 2011 to May 22, 2016) and forecast M
 
 The scoring reproduces the organizers' exactly. anofox_forecast's Naive and seasonal-naive forecasts score **1.752** and **0.847**, the competition's own benchmark values, and all 42,840 weights agree with the official file.
 
-## Four methods, settings fixed in advance
+## The methods, settings fixed in advance
 
 - **One global model:** anofox_ml's `PerpetualRegressor`, a gradient-boosting model with one `budget` knob that needs no tuning. It uses a Tweedie loss for counts that are mostly 0 and learns across all series at once. Five fits with different seeds are averaged (see [One fit is a noisy draw](#one-fit-is-a-noisy-draw)).
 - **The last day (Naive)**, **the mean of the last 28 days** and **the same weekday last week**: anofox_forecast's `Naive`, `SMA` and `SeasonalNaive`.
+- **For comparison, LightGBM with the winner's settings:** anofox_ml's `LgbmRegressor` with the parameters of the competition winner's LightGBM models, on the same rows and features as the global model (see [A second model](#a-second-model-lightgbm-with-the-winners-settings)).
 
 All settings were fixed before the test days were looked at.
 
@@ -41,6 +42,7 @@ All settings were fixed before the test days were looked at.
 |---|---|
 | Competition winner (YJ_STU) | 0.520 |
 | 50th of 5,507 teams | 0.576 |
+| LightGBM with the winner's settings (anofox_ml) | 0.608 |
 | **One global model (anofox_ml)** | **0.618** |
 | Best benchmark: bottom-up exponential smoothing (ES_bu) | 0.671 |
 | Same weekday last week (sNaive) | 0.847 |
@@ -63,13 +65,25 @@ anofox_statistics tests every difference over the 28 test days with Diebold–Ma
 
 - **Where items add up, the gain is real.** On the daily weighted part of WRMSSE the global model beats every baseline, by 42–85 %, each with p < 0.0001. At the top the gain is largest: for all stores together the global model scores 0.28 and the same weekday last week 0.56.
 - **On single items the gain is small.** Against the mean of the last 28 days its CRPS is 0.7 % lower, which is significant, and its MAE 1.2 % lower (p = 0.07, not significant at 5 %). Series by series most items show no difference either way. In MAE more items are worse than better, because a model of the expected demand forecasts a little above 0 for an item that usually sells nothing, while the absolute error rewards forecasting 0 itself.
-- **The Model Confidence Set** (90 %) keeps only the global model, for all three losses.
+- **Against LightGBM with the winner's settings** the global model is level on WRMSSE (p = 0.54). It is better for all stores together and worse on single items, where LightGBM's MAE is 1.3 % and its CRPS 0.9 % lower (both significant).
+- **The Model Confidence Set** (90 %) keeps both models for WRMSSE and only LightGBM for MAE and CRPS. None of the baselines survives.
 
 For a planner that means one model gives much better forecasts for stores, departments and the whole chain. On a single slow-moving item, the mean of its last four weeks comes close.
 
 ## One fit is a noisy draw
 
 A single PerpetualRegressor fit on 11 million rows lands somewhere else with every seed. Even a change in the 13th decimal of the features moves it. The five seeds' single fits score between **0.611 and 0.725** on the test days, so one fit alone could have told almost any story. The case therefore averages the five. That choice was made on the 28 days before the test days, where the average beat four of the five single fits. On the test days it does the same. The pipeline is also deterministic: two runs give identical results, file for file.
+
+## A second model: LightGBM with the winner's settings
+
+The competition's winner (YJ_STU) used LightGBM. For comparison, anofox_ml's `LgbmRegressor` takes the winner's parameters from the published code (Mcompetitions/M5-methods, `Code of Winning Methods/A1`): a Tweedie loss with variance power 1.1, a learning rate of 0.015, 3,000 rounds, 255 leaves, at least 255 rows per leaf, and half the rows and features sampled. It runs on the same rows and features as the global model, with three seeds averaged. Two things differ from the winner. It is one model for all stores, where the winner fitted one per store. And the winner's `boost_from_average = False` has no counterpart in anofox_ml yet ([anofox-ml#108](https://github.com/DataZooDE/anofox-ml/issues/108)).
+
+| Test days | WRMSSE | MAE | CRPS | All stores | Item × store |
+|---|---|---|---|---|---|
+| LightGBM, winner's settings | 0.608 | 1.092 | 0.754 | 0.384 | 0.891 |
+| Global model (PerpetualRegressor) | 0.618 | 1.106 | 0.761 | 0.279 | 0.900 |
+
+LightGBM is a little better on single items, the PerpetualRegressor clearly better for the whole chain. On the competition's score the two can't be told apart. On the 28 days before the test days LightGBM was ahead too (0.664 against 0.707), and it scatters far less between seeds (0.660–0.668). The PerpetualRegressor stays this page's model because it needs no settings at all. LightGBM needs ten, here taken from the winner.
 
 ## How sure: intervals for every method
 
