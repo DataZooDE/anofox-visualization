@@ -64,6 +64,8 @@ pub struct StaticPage<'a> {
     pub theme: &'a ResolvedTheme,
     /// `<title>` when the dashboard sets no `::DASHBOARD_TITLE`.
     pub fallback_title: &'a str,
+    /// The dashboard's `-- @description`, under the title (#1345); text.
+    pub description: Option<&'a str>,
     /// A line under the header (e.g. "rendered from x.sql · 4 panels"); HTML.
     pub subtitle_html: String,
     /// Extra `<head>` markup (e.g. a meta refresh).
@@ -242,6 +244,40 @@ pub(crate) fn upper_keep_greek(s: &str) -> String {
         .collect()
 }
 
+/// #1345: a static page keeps the dashboard's `::TAB`s. Each tab's panels
+/// sit in a `<section class="dp-tab">` under the tab's name
+/// ([`tab_open`]); the section is `display: contents`, so its panels stay on
+/// the page's grid. [`TABS_SCRIPT`] turns the sections into a tab bar and
+/// shows one at a time; without scripts, and in print, every tab shows under
+/// its heading.
+pub const TAB_CLASS: &str = "class=\"dp-tab\"";
+
+/// The opening of a tab's section, closing the one before it (`open`).
+pub fn tab_open(label: &str, open: bool) -> String {
+    format!(
+        "{}<section {TAB_CLASS} data-tab=\"{}\"><h2 class=\"section dp-tab-title\">{}</h2>",
+        if open { "</section>" } else { "" },
+        esc(label),
+        esc(label)
+    )
+}
+
+/// The tab bar uses the app's own `.tabbar` / `.tab-btn` styles (embedded with
+/// the theme's CSS); only the sections' behaviour and the print view are here.
+const TABS_CSS: &str = "section.dp-tab{display:contents}section.dp-tab[hidden]{display:none}\
+.dp-tabs-on h2.dp-tab-title{display:none}\
+@media print{.tabbar{display:none}section.dp-tab[hidden]{display:contents}.dp-tabs-on h2.dp-tab-title{display:flex}}";
+
+const TABS_SCRIPT: &str = "(function(){var s=[].slice.call(document.querySelectorAll('section.dp-tab'));\
+if(s.length<2)return;var nav=document.createElement('div');\
+nav.className='tabbar';nav.setAttribute('role','tablist');\
+var bs=s.map(function(sec,i){var b=document.createElement('button');b.type='button';b.className='tab-btn';\
+b.setAttribute('role','tab');b.textContent=sec.getAttribute('data-tab');\
+b.addEventListener('click',function(){show(i);});nav.append(b);return b;});\
+function show(k){s.forEach(function(sec,i){sec.hidden=i!==k;bs[i].classList.toggle('active',i===k);\
+bs[i].setAttribute('aria-selected',i===k?'true':'false');});window.dispatchEvent(new Event('resize'));}\
+s[0].parentElement.insertBefore(nav,s[0]);document.body.classList.add('dp-tabs-on');show(0);})();";
+
 /// Render a static page.
 pub fn render(p: &StaticPage) -> String {
     let t = p.theme;
@@ -257,12 +293,21 @@ pub fn render(p: &StaticPage) -> String {
     } else {
         theme::header_html(t)
     };
+    // the dashboard's description (#1345), then the source line
+    let mut sub = p
+        .description
+        .filter(|d| !d.trim().is_empty())
+        .map(|d| format!("<p class=\"dp-desc\">{}</p>", esc(d.trim())))
+        .unwrap_or_default();
+    if !p.subtitle_html.is_empty() {
+        sub.push_str(&format!("<div class=\"dp-src\">{}</div>", p.subtitle_html));
+    }
     format!(
         "<!doctype html><html lang=\"{lang}\" data-theme=\"{name}\" data-variant=\"{variant}\"><head><meta charset=\"utf-8\">\
 <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">{head_extra}{favicon}<title>{title}</title>\
-<style>{css}{fit_css}</style></head>\
+<style>{css}{fit_css}{tabs_css}</style></head>\
 <body class=\"dp-static{fit_class}\"><div class=\"grid{spans}\">{header}{sub}{controls}{panels}</div>\
-<div id=\"dp-tip\" class=\"dp-tip\"></div><script>{HOVER_SCRIPT}{ASOF_SCRIPT}{CONTROLS_SCRIPT}{stepper}{nocase}</script></body></html>",
+<div id=\"dp-tip\" class=\"dp-tip\"></div><script>{HOVER_SCRIPT}{ASOF_SCRIPT}{CONTROLS_SCRIPT}{stepper}{nocase}{tabs}</script></body></html>",
         lang = esc(t.locale.as_deref().unwrap_or("en")),
         name = esc(&t.name),
         variant = t.variant.as_str(),
@@ -270,13 +315,10 @@ pub fn render(p: &StaticPage) -> String {
         favicon = theme::favicon_html(t),
         title = esc(&title),
         css = theme::page_css(t),
-        sub = if p.subtitle_html.is_empty() {
-            String::new()
-        } else {
-            format!("<div class=\"dp-src\">{}</div>", p.subtitle_html)
-        },
         controls = p.controls_html,
         fit_css = if p.fit { FIT_CSS } else { "" },
+        tabs_css = if p.panels_html.contains(TAB_CLASS) { TABS_CSS } else { "" },
+        tabs = if p.panels_html.contains(TAB_CLASS) { TABS_SCRIPT } else { "" },
         fit_class = if p.fit { " dp-fit" } else { "" },
         spans = if p.panels_html.contains(" dp-span-") { " dp-spans" } else { "" },
         stepper = if p.panels_html.contains("data-story=") { stepper_script() } else { String::new() },
@@ -302,6 +344,7 @@ pub fn list(t: &ResolvedTheme, title: &str, items: &[(String, String)]) -> Strin
     render(&StaticPage {
         theme: t,
         fallback_title: title,
+        description: None,
         subtitle_html: String::new(),
         head_extra: String::new(),
         controls_html: String::new(),
@@ -653,6 +696,7 @@ mod tests {
         render(&StaticPage {
             theme: set.pick(theme::Variant::Light),
             fallback_title: "t",
+            description: None,
             subtitle_html: String::new(),
             head_extra: String::new(),
             controls_html: String::new(),
@@ -695,6 +739,7 @@ mod tests {
             render(&StaticPage {
                 theme: set.pick(theme::Variant::Light),
                 fallback_title: "t",
+                description: None,
                 subtitle_html: String::new(),
                 head_extra: String::new(),
                 controls_html: String::new(),
@@ -872,6 +917,7 @@ mod slot_tests {
             render(&StaticPage {
                 theme: &t,
                 fallback_title: "t",
+                description: None,
                 subtitle_html: String::new(),
                 head_extra: String::new(),
                 controls_html: String::new(),
@@ -912,6 +958,7 @@ mod fit_tests {
             render(&StaticPage {
                 theme: &t,
                 fallback_title: "x",
+                description: None,
                 subtitle_html: String::new(),
                 head_extra: String::new(),
                 controls_html: String::new(),

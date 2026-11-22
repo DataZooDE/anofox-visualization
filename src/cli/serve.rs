@@ -3632,6 +3632,7 @@ fn render_dashboard_page(
     Ok(page::render(&page::StaticPage {
         theme: &t,
         fallback_title: &dash.meta.title,
+        description: dash.meta.description.as_deref(),
         subtitle_html: String::new(),
         head_extra: meta,
         controls_html: controls,
