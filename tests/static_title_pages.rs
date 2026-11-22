@@ -91,8 +91,8 @@ fn figures(html: &str) -> Vec<String> {
         .collect()
 }
 
-/// The page's desktop drawings only (#1345): the `dashboard` CLI also draws
-/// each panel at phone width (`svg.dp-narrow`), the served page does not.
+/// The page's desktop drawings only (#1345): the `dashboard` CLI and the
+/// served page also draw each panel at phone width (`svg.dp-narrow`).
 fn desktop(html: &str) -> String {
     let mut out = String::new();
     let mut rest = html;
@@ -229,7 +229,13 @@ fn serve_static_page_draws_title_bars() {
     );
     let resp = http_get(port, "/d/titles");
     assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
-    check_page(&http_body(&resp));
+    let body = http_body(&resp);
+    // #1353: the served page draws each chart at phone width too
+    assert!(
+        body.contains("<svg class=\"dp-narrow\" xmlns=\"http://www.w3.org/2000/svg\" width=\"316\" height=\"26\""),
+        "{body}"
+    );
+    check_page(&body);
 }
 
 /// #214: a `::VIEW` group's two alternatives, each with its own title —
