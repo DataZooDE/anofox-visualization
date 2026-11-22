@@ -1,0 +1,113 @@
+---
+title: "Does one model beat the M5 benchmarks on every Walmart item?"
+description: "All 30,490 item-store series of the M5 competition, 28 days ahead, scored as the competition scored them: one global anofox_ml model on anofox_forecast features against the usual baselines, tested with anofox_statistics."
+---
+
+import shotL from "../../../assets/showcase/m5-daily-forecast-light.webp";
+import shotD from "../../../assets/showcase/m5-daily-forecast-dark.webp";
+import boardL from "../../../assets/showcase/m5-daily-forecast-board-light.webp";
+import boardD from "../../../assets/showcase/m5-daily-forecast-board-dark.webp";
+
+A retailer's demand planner forecasts every item in every store, every day. The [M5 competition](https://www.kaggle.com/competitions/m5-forecasting-accuracy) asked 5,507 teams to do exactly that for Walmart: 3,049 items in 10 stores in California, Texas and Wisconsin, 30,490 daily series, 28 days ahead. Most items sell a few units a day or nothing at all. **Does one model learned across all items beat the usual baselines, scored the way the competition scored, and is the gain more than luck?**
+
+This page answers it in the competition's own setting. Three DuckDB extensions work together:
+
+- **anofox_forecast** computes the series features the model learns from, and forecasts the baselines.
+- **anofox_ml** fits one global model on all 30,490 series.
+- **anofox_statistics** tests whether the differences are real.
+
+<figure class="doc-shot">
+  <img class="lp-light" src={shotL.src} alt="All 10 stores, units per day: the last 12 weeks and the four forecasts of the 28 test days" />
+  <img class="lp-dark" src={shotD.src} alt="" />
+  <figcaption>All 10 stores: what sold, and the four forecasts of the 28 test days. <a href="../../app/?dashboard=does-one-model-beat-the-m5-benchmarks-on-every-walmart-item">Open it ↗</a></figcaption>
+</figure>
+
+## The setting
+
+The models train on days 1 to 1941 (January 2011 to May 22, 2016) and forecast May 23 to June 19, 2016: the competition's final test days. The score is the competition's **WRMSSE**. It takes the error of every series at 12 levels (total, states, stores, categories, departments, their combinations, items), scales it by how much the series moves from day to day, and weights it by dollar sales. Lower is better.
+
+The scoring reproduces the organizers' exactly. anofox_forecast's Naive and seasonal-naive forecasts score **1.752** and **0.847**, the competition's own benchmark values, and all 42,840 weights agree with the official file.
+
+## Four methods, settings fixed in advance
+
+- **One global model:** anofox_ml's `PerpetualRegressor`, a gradient-boosting model with one `budget` knob that needs no tuning. It uses a Tweedie loss for counts that are mostly 0 and learns across all series at once. Five fits with different seeds are averaged (see [One fit is a noisy draw](#one-fit-is-a-noisy-draw)).
+- **The last day (Naive)**, **the mean of the last 28 days** and **the same weekday last week**: anofox_forecast's `Naive`, `SMA` and `SeasonalNaive`.
+
+All settings were fixed before the test days were looked at.
+
+## Against the competition
+
+| Method | WRMSSE |
+|---|---|
+| Competition winner (YJ_STU) | 0.520 |
+| 50th of 5,507 teams | 0.576 |
+| **One global model (anofox_ml)** | **0.618** |
+| Best benchmark: bottom-up exponential smoothing (ES_bu) | 0.671 |
+| Same weekday last week (sNaive) | 0.847 |
+| Mean of the last 28 days | 0.946 |
+| The last day (Naive) | 1.752 |
+
+The competition's numbers are the organizers' published scores (Makridakis, Spiliotis & Assimakopoulos 2022, ["M5 accuracy competition: Results, findings, and conclusions"](https://doi.org/10.1016/j.ijforecast.2021.11.013), *International Journal of Forecasting* 38(4); the score sheet in [Mcompetitions/M5-methods](https://github.com/Mcompetitions/M5-methods)).
+
+The untuned global model beats all 24 of the competition's benchmarks and is 27 % better than the same weekday last week. The top teams combined many tuned models and stayed ahead.
+
+<figure class="doc-shot">
+  <img class="lp-light" src={boardL.src} alt="WRMSSE of top teams, the competition's benchmarks and the global model" />
+  <img class="lp-dark" src={boardD.src} alt="" />
+  <figcaption>WRMSSE, lower is better: top teams, the benchmarks and the global model.</figcaption>
+</figure>
+
+## Is it luck?
+
+anofox_statistics tests every difference over the 28 test days with Diebold–Mariano tests (`diebold_mariano_agg`), pooled over all series and series by series. Its Model Confidence Set (`model_confidence_set_agg`) keeps the methods that can't be told apart from the best.
+
+- **Where items add up, the gain is real.** On the daily weighted part of WRMSSE the global model beats every baseline, by 42–85 %, each with p < 0.0001. At the top the gain is largest: for all stores together the global model scores 0.28 and the same weekday last week 0.56.
+- **On single items the gain is small.** Against the mean of the last 28 days its CRPS is 0.7 % lower, which is significant, and its MAE 1.2 % lower (p = 0.07, not significant at 5 %). Series by series most items show no difference either way. In MAE more items are worse than better, because a model of the expected demand forecasts a little above 0 for an item that usually sells nothing, while the absolute error rewards forecasting 0 itself.
+- **The Model Confidence Set** (90 %) keeps only the global model, for all three losses.
+
+For a planner that means one model gives much better forecasts for stores, departments and the whole chain. On a single slow-moving item, the mean of its last four weeks comes close.
+
+## One fit is a noisy draw
+
+A single PerpetualRegressor fit on 11 million rows lands somewhere else with every seed. Even a change in the 13th decimal of the features moves it. The five seeds' single fits score between **0.611 and 0.725** on the test days, so one fit alone could have told almost any story. The case therefore averages the five. That choice was made on the 28 days before the test days, where the average beat four of the five single fits. On the test days it does the same. The pipeline is also deterministic: two runs give identical results, file for file.
+
+## How sure: intervals for every method
+
+Each method also forecast the 28 days before the test days. The quantiles of its errors there, scaled by each item's level and taken per band of sales and forecast week, give its intervals on the test days. One recipe serves all four methods. The global model's 50 %, 80 % and 95 % intervals held **51.0 %, 79.8 % and 95.2 %** of the actual sales. **CRPS**, the error of the whole forecast distribution, comes from 20 of these quantiles.
+
+## What the model learns from
+
+| Source | Features |
+|---|---|
+| **anofox_forecast** (`ts_features_agg`) | 13 series features on the year before each forecast day: mean, spread, variation, 90 % quantile, maximum, skewness, trend slope, autocorrelation at lag 1 and 7, longest run below the mean, mean change, permutation entropy, peaks |
+| SQL windows | the last day, the means of the last 7, 28 and 91 days, spread, share of days without sales, days since the last sale, the same weekday in recent weeks |
+| The competition's calendar and prices | day of week and month, events, SNAP days, the price and how it moved |
+| Item group | category, department, store |
+
+The model leans most on the recent level, the mean of the last 28 days, then on the 90 % quantile of the past year from anofox_forecast, the last week and how long the item has gone without a sale. This is measured out of sample: how much the error rises when one feature is shuffled.
+
+## How it's built
+
+Each training row is a series on a forecast day with a horizon of 1–28 days, and every feature uses data up to that day only. The final model trains on the year before the test days, 11 million rows:
+
+```sql
+LOAD anofox_forecast; LOAD anofox_ml; LOAD anofox_statistics;
+
+-- series features from anofox_forecast
+SELECT id, o, ts_features_agg(ds, y, ['mean', 'standard_deviation', 'autocorrelation_lag7', …]) AS f
+FROM history GROUP BY id, o;
+
+-- one global model from anofox_ml, five seeds averaged
+SELECT seed, ml_fit_agg('PerpetualRegressor', y, feats(ex),
+         '{"budget": 0.5, "objective": {"TweedieLoss": {"p": 1.5}}, "seed": ' || seed || '}' ORDER BY id, o, h) AS m
+FROM ex, range(7, 12) s(seed) WHERE o < 1941 GROUP BY seed;
+
+-- the tests from anofox_statistics
+SELECT diebold_mariano_agg(0.0, tree, base, {'loss': 'absolute', 'horizon': 7} ORDER BY t) FROM daily;
+```
+
+The ten fits (five seeds at each of two cutoffs) take 5–9 minutes each natively. The dashboard reads the stored results, so it opens in the browser at once. The whole pipeline is `scripts/gen-m5-case.sh` in the repository; it needs the competition's CSVs.
+
+The dashboard *Does one model beat the M5 benchmarks on every Walmart item?* is in the [online demo](../../app/?dashboard=does-one-model-beat-the-m5-benchmarks-on-every-walmart-item). Its tabs show the score against the competition, the tests, the intervals for six items, any item of any store, and what the model looks at.
+
+For a smaller version, one model for every item of one store on monthly sales, see [Can one model forecast every item?](../global-forecast/).

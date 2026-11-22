@@ -222,7 +222,10 @@ const shoot = async (name) => {
   // errors: error boxes, error SVGs (red text) and "ships with the next release" notes
   const found = await page.evaluate((width) => {
     const vis = (e) => e.offsetParent !== null;
-    const errs = [...document.querySelectorAll(".dash .err, .dash pre")].filter(vis).map((e) => e.textContent.slice(0, 300));
+    // an error card's details are a <pre>; a ::MARKDOWN code block (.md-body pre) is not an error
+    const errs = [...document.querySelectorAll(".dash .err, .dash pre")]
+      .filter((e) => vis(e) && !e.closest(".md-body"))
+      .map((e) => e.textContent.slice(0, 300));
     const svgErr = [...document.querySelectorAll(".dash .panel svg text[fill='#b42318']")]
       .filter((e) => vis(e.closest(".panel")))
       .map((e) => e.textContent.slice(0, 300));
