@@ -1,0 +1,75 @@
+method,wrmsse,kind
+Naive,1.752,benchmark
+sNaive,0.847,benchmark
+SES,0.969,benchmark
+MA,0.956,benchmark
+CRO,0.957,benchmark
+optCRO,0.958,benchmark
+SBA,0.957,benchmark
+TSB,0.961,benchmark
+ADIDA,0.955,benchmark
+iMAPA,0.96,benchmark
+ES_td,0.72,benchmark
+ES_bu,0.671,benchmark
+ESX,0.679,benchmark
+ARIMA_td,0.796,benchmark
+ARIMA_bu,0.908,benchmark
+ARIMAX,0.691,benchmark
+MLP,0.977,benchmark
+RF,1.01,benchmark
+gMLP,0.961,benchmark
+gRF,1.065,benchmark
+Com_b,0.723,benchmark
+Com_t,0.745,benchmark
+Com_tb,0.682,benchmark
+Com_lg,0.953,benchmark
+YJ_STU,0.52,team
+Matthias,0.528,team
+mf,0.536,team
+monsaraida,0.536,team
+Alan Lahoud,0.536,team
+wyzJack_STU,0.544,team
+RandomLearner,0.546,team
+SHJ,0.547,team
+gest 2,0.547,team
+DenisKokosinskiy_STU,0.547,team
+XueWang,0.549,team
+yq_STU,0.55,team
+PoHaoChou,0.55,team
+Tsuru,0.552,team
+bk_18,0.552,team
+N60610,0.552,team
+MonashSL_STU,0.552,team
+leoclement,0.555,team
+minghui_Tju,0.556,team
+zfc613,0.557,team
+Nodalpoints,0.557,team
+CPUkiller,0.558,team
+dont overfit,0.558,team
+Dan Hargreaves,0.558,team
+M0T0_STU,0.559,team
+Genryu,0.559,team
+Moscow Five,0.56,team
+Daniela A,0.561,team
+shuheioka,0.562,team
+sk 2,0.563,team
+nagao,0.564,team
+AjayNagar,0.564,team
+cjwh,0.566,team
+CWD75,0.567,team
+Groot,0.567,team
+Astral,0.568,team
+Logistic,0.568,team
+jdsc_perceiving_team,0.568,team
+Abzal,0.57,team
+Pianus,0.57,team
+NAU,0.57,team
+shirokane_friends,0.57,team
+Alexnet,0.571,team
+Griffin_Series,0.574,team
+Hiromitsu Kigure,0.574,team
+YK,0.575,team
+PASSTA,0.575,team
+golubyatniks,0.576,team
+belkasanek,0.576,team
+Random_prediction,0.576,team

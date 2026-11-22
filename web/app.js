@@ -1116,6 +1116,7 @@ const FILE_SAMPLES = [
   "examples/forecast-callcentre-staffing.sql",
   "examples/forecast-energy-load.sql",
   "examples/ml-global-forecast.sql",
+  "examples/m5-daily-forecast.sql",
   "examples/decide-showcase.sql",
   "examples/decide-claims.sql",
   "examples/tabular-feed.sql",

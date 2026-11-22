@@ -33,3 +33,4 @@ web/data/boundaries/nuts*.csv
 # #1218: scripts/web-plugins.sh (static web builds only)
 /web/plugins.json
 /web/modules/
+m5-work.duckdb*
