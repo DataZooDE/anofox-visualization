@@ -1,0 +1,165 @@
+{
+ "//": "#1345: renderMarkdown (web/app.js) and src/markdown_html.rs must give this HTML for each md (image sources as the plain builder resolves them). Regenerate from the browser side only.",
+ "vectors": [
+  {
+   "md": "",
+   "html": ""
+  },
+  {
+   "md": "plain text",
+   "html": "<p>plain text</p>"
+  },
+  {
+   "md": "two\nlines joined",
+   "html": "<p>two lines joined</p>"
+  },
+  {
+   "md": "para one\n\npara two",
+   "html": "<p>para one</p><p>para two</p>"
+  },
+  {
+   "md": "# H1\n## H2 **b**\n###### H6\n####### not",
+   "html": "<h1>H1</h1><h2>H2 <strong>b</strong></h2><h6>H6</h6><p>####### not</p>"
+  },
+  {
+   "md": "#nospace",
+   "html": "<p>#nospace</p>"
+  },
+  {
+   "md": "**bold** and __also__ and *it* and `co*de*`",
+   "html": "<p><strong>bold</strong> and <strong>also</strong> and <em>it</em> and <code>co<em>de</em></code></p>"
+  },
+  {
+   "md": "a*b* *c* **x*",
+   "html": "<p>a<em>b</em> <em>c</em> **x*</p>"
+  },
+  {
+   "md": "``empty`` and `x`",
+   "html": "<p>`<code>empty</code><code> and </code>x`</p>"
+  },
+  {
+   "md": "[link](https://example.com) [bad](javascript:alert(1)) [rel](docs/a.md) [pr](//x.org/p) [m](mailto:a@b.c)",
+   "html": "<p><a href=\"https://example.com\" target=\"_blank\" rel=\"noopener\">link</a> bad) <a href=\"docs/a.md\" target=\"_blank\" rel=\"noopener\">rel</a> <a href=\"https://x.org/p\" target=\"_blank\" rel=\"noopener\">pr</a> <a href=\"mailto:a@b.c\" target=\"_blank\" rel=\"noopener\">m</a></p>"
+  },
+  {
+   "md": "[spaced url](https://a.b/c d)",
+   "html": "<p><a href=\"https://a.b/c d\" target=\"_blank\" rel=\"noopener\">spaced url</a></p>"
+  },
+  {
+   "md": "[](x) [t]()",
+   "html": "<p>[](x) [t]()</p>"
+  },
+  {
+   "md": "- one\n- two\n* three\n+ four\n\n1. a\n2. b\n10. c",
+   "html": "<ul><li>one</li><li>two</li><li>three</li><li>four</li></ul><ol><li>a</li><li>b</li><li>c</li></ol>"
+  },
+  {
+   "md": "- item\n1. switch list\n- back",
+   "html": "<ul><li>item</li></ul><ol><li>switch list</li></ol><ul><li>back</li></ul>"
+  },
+  {
+   "md": "> quote **b**\n>tight",
+   "html": "<blockquote>quote <strong>b</strong></blockquote><blockquote>tight</blockquote>"
+  },
+  {
+   "md": "---\n***\n_ _ _\n--",
+   "html": "<hr><hr><hr><p>--</p>"
+  },
+  {
+   "md": "- - -",
+   "html": "<hr>"
+  },
+  {
+   "md": "```\ncode <b>\n  indented\n```\nafter",
+   "html": "<pre><code>code &lt;b&gt;\n  indented\n</code></pre><p>after</p>"
+  },
+  {
+   "md": "```sql\nSELECT 1\n",
+   "html": "<pre><code>SELECT 1\n\n</code></pre>"
+  },
+  {
+   "md": "text\n```\nfence ends para\n```",
+   "html": "<p>text</p><pre><code>fence ends para\n</code></pre>"
+  },
+  {
+   "md": "| a | b |\n|:--|--:|\n| **x** | y \\| z |\n| 1 |\n| 1 | 2 | 3 |\nafter",
+   "html": "<table class=\"md-table\"><thead><tr><th style=\"text-align:left\">a</th><th style=\"text-align:right\">b</th></tr></thead><tbody><tr><td style=\"text-align:left\"><strong>x</strong></td><td style=\"text-align:right\">y | z</td></tr><tr><td style=\"text-align:left\">1</td><td style=\"text-align:right\"></td></tr><tr><td style=\"text-align:left\">1</td><td style=\"text-align:right\">2</td></tr></tbody></table><p>after</p>"
+  },
+  {
+   "md": "a | b\n--|--\n1 | 2",
+   "html": "<table class=\"md-table\"><thead><tr><th>a</th><th>b</th></tr></thead><tbody><tr><td>1</td><td>2</td></tr></tbody></table>"
+  },
+  {
+   "md": "a | b\nc | d",
+   "html": "<p>a | b c | d</p>"
+  },
+  {
+   "md": "| h |\n|:-:|\n| c |",
+   "html": "<table class=\"md-table\"><thead><tr><th style=\"text-align:center\">h</th></tr></thead><tbody><tr><td style=\"text-align:center\">c</td></tr></tbody></table>"
+  },
+  {
+   "md": "Intro\n| a | b |\n|---|---|\n| 1 | 2 |",
+   "html": "<p>Intro</p><table class=\"md-table\"><thead><tr><th>a</th><th>b</th></tr></thead><tbody><tr><td>1</td><td>2</td></tr></tbody></table>"
+  },
+  {
+   "md": "<script>alert(1)</script> & \"q\" 'a'",
+   "html": "<p>&lt;script&gt;alert(1)&lt;/script&gt; &amp; &quot;q&quot; &#39;a&#39;</p>"
+  },
+  {
+   "md": "Price $5 and $10",
+   "html": "<p>Price $5 and $10</p>"
+  },
+  {
+   "md": "Inline $x^2$ and display $$\\sum_i x_i$$ end",
+   "html": "<p>Inline <span class=\"md-math\" data-tex=\"x^2\"><code class=\"md-tex\">x^2</code></span> and display <span class=\"md-math md-math-display\" data-tex=\"\\sum_i x_i\"><code class=\"md-tex\">\\sum_i x_i</code></span> end</p>"
+  },
+  {
+   "md": "\\$ literal and `$not$`",
+   "html": "<p>$ literal and <code>$not$</code></p>"
+  },
+  {
+   "md": "![alt](assets/a.png) ![x](https://e.com/i.png) ![bad](../up.png) ![d](data:image/png;base64,AAAA) ![](javascript:x)",
+   "html": "<p><img class=\"md-img\" src=\"assets/a.png\" alt=\"alt\" loading=\"lazy\" decoding=\"async\"> <img class=\"md-img\" src=\"https://e.com/i.png\" alt=\"x\" loading=\"lazy\" decoding=\"async\"> bad <img class=\"md-img\" src=\"data:image/png;base64,AAAA\" alt=\"d\" loading=\"lazy\" decoding=\"async\"> </p>"
+  },
+  {
+   "md": "![x [a](b)](c)",
+   "html": "<p><img class=\"md-img\" src=\"b\" alt=\"x [a\" loading=\"lazy\" decoding=\"async\">](c)</p>"
+  },
+  {
+   "md": "![$\\alpha$](assets/a.png)",
+   "html": "<p><img class=\"md-img\" src=\"assets/a.png\" alt=\"\\alpha\" loading=\"lazy\" decoding=\"async\"></p>"
+  },
+  {
+   "md": "![a b](assets/a.png c)",
+   "html": "<p>!<a href=\"assets/a.png c\" target=\"_blank\" rel=\"noopener\">a b</a></p>"
+  },
+  {
+   "md": "line\n# heading breaks para\n- and list",
+   "html": "<p>line</p><h1>heading breaks para</h1><ul><li>and list</li></ul>"
+  },
+  {
+   "md": "para\n> quote",
+   "html": "<p>para</p><blockquote>quote</blockquote>"
+  },
+  {
+   "md": "para\n12. item",
+   "html": "<p>para</p><ol><li>item</li></ol>"
+  },
+  {
+   "md": "0 forged",
+   "html": "<p>0 forged</p>"
+  },
+  {
+   "md": "  indented para\n  continues",
+   "html": "<p>  indented para   continues</p>"
+  },
+  {
+   "md": "Ünïcödé **fett** — *kursiv* ✓",
+   "html": "<p>Ünïcödé <strong>fett</strong> — <em>kursiv</em> ✓</p>"
+  },
+  {
+   "md": "* not italic\n*really*",
+   "html": "<ul><li>not italic</li></ul><p><em>really</em></p>"
+  }
+ ]
+}

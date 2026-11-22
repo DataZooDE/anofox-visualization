@@ -79,6 +79,75 @@ pub struct StaticPage<'a> {
     pub fit: bool,
 }
 
+/// The static page's 12-column grid width (#1345): a 1440 px window less
+/// the page's padding; `web/theme-base.css` caps `.grid.dp-spans` at it.
+pub const SPAN_GRID_PX: f64 = 1376.0;
+/// The grid's gap (1.15rem).
+const SPAN_GAP_PX: f64 = 18.4;
+
+/// A phone's panel width on a static page (#1345): a 390 px screen less the
+/// page's and the card's padding there (`web/theme-base.css`).
+pub const PHONE_PX: u32 = 316;
+
+/// A panel's phone drawing (#1345): [`PHONE_PX`] wide, or — a table whose
+/// cells would be cut there — the narrowest of a few wider widths that cuts
+/// none (up to 840 px), which the page then scrolls sideways in its card,
+/// as the app does with a wide table on a phone.
+pub fn phone_drawing(draw: impl Fn(u32, u32) -> String, h: u32) -> String {
+    let cut = |svg: &str| svg.contains("\u{2026}<title>");
+    let mut svg = draw(PHONE_PX, h);
+    for w in [420, 540, 680, 840] {
+        if !cut(&svg) {
+            break;
+        }
+        svg = draw(w, h);
+    }
+    svg
+}
+
+/// A panel's drawing with its phone-width drawing next to it (#1345): the
+/// page shows `svg.dp-wide` and, on a narrow screen, `svg.dp-narrow`
+/// instead. Without a phone drawing (or when either isn't an `<svg>`, e.g.
+/// an error) the panel keeps its one drawing.
+pub fn with_phone(wide: String, narrow: Option<String>) -> String {
+    // every top-level <svg> (a title bar is one of its own), not a nested one
+    let mark = |svg: &str, class: &str| {
+        let mut out = String::with_capacity(svg.len() + 64);
+        let (mut depth, mut rest) = (0usize, svg);
+        while let Some(i) = rest
+            .find("<svg")
+            .into_iter()
+            .chain(rest.find("</svg>"))
+            .min()
+        {
+            out.push_str(&rest[..i]);
+            rest = &rest[i..];
+            if let Some(r) = rest.strip_prefix("</svg>") {
+                depth = depth.saturating_sub(1);
+                out.push_str("</svg>");
+                rest = r;
+            } else {
+                if depth == 0 && rest.starts_with("<svg ") {
+                    out.push_str(&format!("<svg class=\"{class}\""));
+                    rest = &rest[4..];
+                } else {
+                    out.push_str("<svg");
+                    rest = &rest[4..];
+                }
+                depth += 1;
+            }
+        }
+        out.push_str(rest);
+        out
+    };
+    match narrow {
+        Some(n) if wide.starts_with("<svg ") && n.starts_with("<svg ") => {
+            format!("{}{}", mark(&wide, "dp-wide"), mark(&n, "dp-narrow"))
+        }
+        _ => wide,
+    }
+}
+
 /// A panel's place on a static page (#1292): the `::SPAN` (of 12 columns)
 /// and `::HEIGHT` statements right before it, as the browser and
 /// `dashboard --svg` read them. Both apply to the next panel only.
@@ -136,12 +205,23 @@ impl Slot {
         )
     }
 
-    /// The drawing size: 460 × 300 as before for a panel without either;
-    /// a span widens it in steps of a twelfth of a two-panel row (6 = 460,
-    /// 12 = 928), a height sets the height (a share of the window as of a
+    /// The drawing size: 460 × 300 as before for a panel without either
+    /// on a page without spans. On a page with spans (`spans`) a panel is
+    /// drawn at the width it gets on the static page's 12-column grid
+    /// (#1345: `SPAN_GRID_PX` wide, its 18.4 px gaps, a card's 42 px of
+    /// padding and border), so it shows at its own size there instead of
+    /// scaled up; one without a span takes 6 columns, as the page's CSS
+    /// places it. A height sets the height (a share of the window as of a
     /// 900 px high one).
-    pub fn size(&self) -> (u32, u32) {
-        let w = self.span.map_or(460, |s| 78 * s.clamp(1, 12) - 8);
+    pub fn size(&self, spans: bool) -> (u32, u32) {
+        let w = match (self.span, spans) {
+            (None, false) => 460,
+            (s, _) => {
+                let s = s.unwrap_or(6).clamp(1, 12) as f64;
+                let col = (SPAN_GRID_PX - 11.0 * SPAN_GAP_PX) / 12.0;
+                (s * col + (s - 1.0) * SPAN_GAP_PX - 42.0).round() as u32
+            }
+        };
         let h = self.height.map_or(300, |h| {
             h.px(w as f64, 900.0)
                 .clamp(crate::height::MIN_PX, crate::height::MAX_PX)
@@ -260,6 +340,23 @@ pub fn tab_open(label: &str, open: bool) -> String {
         esc(label),
         esc(label)
     )
+}
+
+/// An input's place on a static page (#1345): the page can't change it, so a
+/// note says it shows the dashboard's default choice.
+pub fn input_note(label: &str, shown: &str) -> String {
+    let (label, shown) = (label.trim(), shown.trim());
+    let what = if label.is_empty() {
+        String::new()
+    } else {
+        format!("<b>{}</b>: ", esc(label))
+    };
+    let choice = if shown.is_empty() || shown.eq_ignore_ascii_case("null") {
+        "this page shows the default choice".to_string()
+    } else {
+        format!("this page shows <b>{}</b>, the default", esc(shown))
+    };
+    format!("<p class=\"dp-input-note\">{what}{choice} — change it in the live dashboard</p>")
 }
 
 /// The tab bar uses the app's own `.tabbar` / `.tab-btn` styles (embedded with
@@ -867,28 +964,45 @@ mod slot_tests {
     use crate::Role;
 
     /// #1292: a ::SPAN / ::HEIGHT statement sizes the next panel; nothing
-    /// set keeps the old 460 × 300.
+    /// set on a page without spans keeps the old 460 × 300.
     #[test]
     fn span_and_height_size_the_panel() {
         let mut s = Slot::default();
-        assert_eq!(s.size(), (460, 300));
+        assert_eq!(s.size(false), (460, 300));
+        // #1345: on a page with spans, drawn at its width on the grid
+        assert_eq!(s.size(true), (637, 300));
         assert_eq!(s.class(), "");
         assert!(s.read(&[(0, Role::Span)], one("12")));
         assert!(s.read(&[(0, Role::Height)], one("680")));
-        assert_eq!(s.size(), (928, 680));
+        assert_eq!(s.size(true), (1334, 680));
         assert_eq!(s.class(), " dp-span-12");
         let mut s = Slot::default();
         s.read(&[(0, Role::Span)], one("6"));
-        assert_eq!(s.size(), (460, 300));
+        assert_eq!(s.size(true), (637, 300));
         // a ratio of the width; out-of-range spans clamp; junk is ignored
         let mut s = Slot::default();
         s.read(&[(0, Role::Span)], one("40"));
         s.height = Some(PanelHeight::Ratio(0.5));
-        assert_eq!(s.size(), (928, 464));
+        assert_eq!(s.size(true), (1334, 667));
         let mut s = Slot::default();
         s.read(&[(0, Role::Span)], one("wide"));
         assert_eq!(s, Slot::default());
         assert!(!s.read(&[(0, Role::Title)], one("x")));
+    }
+
+    /// #1345: every top-level drawing gets its class, a nested one not.
+    #[test]
+    fn a_phone_drawing_marks_each_top_level_svg() {
+        let two = "<svg a><text/></svg><svg b><svg c></svg></svg>".to_string();
+        assert_eq!(
+            with_phone(two.clone(), Some("<svg n></svg>".into())),
+            "<svg class=\"dp-wide\" a><text/></svg><svg class=\"dp-wide\" b><svg c></svg></svg><svg class=\"dp-narrow\" n></svg>"
+        );
+        assert_eq!(
+            with_phone("<pre>e</pre>".into(), Some("<svg n></svg>".into())),
+            "<pre>e</pre>"
+        );
+        assert_eq!(with_phone(two.clone(), None), two);
     }
 
     fn one(v: &str) -> impl Fn(usize) -> Option<String> + '_ {
@@ -902,7 +1016,7 @@ mod slot_tests {
         let roles = [(0, Role::Span), (1, Role::Height)];
         assert!(Slot::is_layout(&roles));
         assert!(s.read(&roles, |i| Some(["12", "680"][i].to_string())));
-        assert_eq!(s.size(), (928, 680));
+        assert_eq!(s.size(true), (1334, 680));
         assert!(!Slot::is_layout(&[(0, Role::Span), (1, Role::Title)]));
         assert_eq!(
             Slot::query(&roles, "SELECT 6, 6;"),

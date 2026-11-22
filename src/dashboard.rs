@@ -180,8 +180,33 @@ fn table_natural_height(rows: &[(String, Vec<Value>)], roles: &[(usize, Role)]) 
     } else {
         0.0
     };
-    (top + 30.0 + nrow * row_h + row_h + 6.0).max(80.0)
+    // a header past its 14 counted characters may wrap onto a second line
+    let head = if rows.iter().any(|(n, _)| n.chars().count() > 14) {
+        HEAD_LINE
+    } else {
+        0.0
+    };
+    (top + head + 30.0 + nrow * row_h + row_h + 6.0).max(80.0)
 }
+
+/// A table panel's height on a static page (#1345): all its rows, up to
+/// [`STATIC_TABLE_MAX_PX`] (then its "… n more rows" line).
+pub(crate) fn static_table_height(
+    rows: &[(String, Vec<Value>)],
+    roles: &[(usize, Role)],
+    w: f64,
+) -> u32 {
+    // a title that wraps at this width adds its lines
+    let extra = title_of(rows, roles)
+        .map_or(0, |t| title_lines(&t, w - 24.0).len().saturating_sub(1)) as f64
+        * 18.0;
+    (table_natural_height(rows, roles) + extra)
+        .min(STATIC_TABLE_MAX_PX)
+        .ceil() as u32
+}
+
+/// About 60 plain rows: a static page is read, not scrolled through.
+const STATIC_TABLE_MAX_PX: f64 = 1400.0;
 
 /// #774: the `::SUBTITLE` line under a title bar (baseline 36), muted and
 /// shortened with an ellipsis to the panel's width.
@@ -2043,6 +2068,57 @@ pub(crate) fn fit_title(title: &str, avail_px: f64) -> String {
     truncate_header(title, 14.0, avail_px).unwrap_or_else(|| title.to_string())
 }
 
+/// A table header's line height when it wraps (#1345).
+const HEAD_LINE: f64 = 13.0;
+
+/// A table header fitted to `avail_px` at its 11 px size (#1345): word-
+/// wrapped onto at most two lines, the last shortened with an ellipsis
+/// when the rest still doesn't fit — and whether anything was cut.
+fn header_lines(head: &str, avail_px: f64) -> (Vec<String>, bool) {
+    wrap_lines(head, 11.0, avail_px, 2)
+}
+
+/// A static page's chart title wrapped to `avail_px` (#1345): at most three
+/// lines of its 14 px bold text, the last shortened with an ellipsis.
+pub(crate) fn title_lines(title: &str, avail_px: f64) -> Vec<String> {
+    wrap_lines(title, 14.0, avail_px, 3).0
+}
+
+/// `text` word-wrapped onto at most `max` lines `avail_px` wide at `size`,
+/// the last shortened with an ellipsis when the rest doesn't fit (a word
+/// wider than a line is shortened too) — and whether anything was cut.
+fn wrap_lines(text: &str, size: f64, avail_px: f64, max: usize) -> (Vec<String>, bool) {
+    let fits = |s: &str| truncate_header(s, size, avail_px).is_none();
+    let words: Vec<&str> = text.split_whitespace().collect();
+    let mut lines = Vec::new();
+    let mut at = 0;
+    while at < words.len() {
+        let rest = words[at..].join(" ");
+        if lines.len() + 1 == max || fits(&rest) {
+            let cut = truncate_header(&rest, size, avail_px);
+            let was_cut = cut.is_some();
+            lines.push(cut.unwrap_or(rest));
+            return (lines, was_cut);
+        }
+        // the longest run of words that fits this line (at least one)
+        let n = (1..=words.len() - at)
+            .take_while(|&n| fits(&words[at..at + n].join(" ")))
+            .last()
+            .unwrap_or(0);
+        if n == 0 {
+            let one = truncate_header(words[at], size, avail_px).unwrap_or_default();
+            lines.push(one);
+            return (lines, true);
+        }
+        lines.push(words[at..at + n].join(" "));
+        at += n;
+    }
+    if lines.is_empty() {
+        lines.push(text.to_string());
+    }
+    (lines, false)
+}
+
 fn truncate_header(head: &str, size: f64, avail_px: f64) -> Option<String> {
     let fits = |s: &str| ggplot_rs::render::text::text_width(s, size) * 1.08 <= avail_px;
     if fits(head) {
@@ -2308,9 +2384,35 @@ fn table_svg(
         }
     };
 
+    // header — a header wider than its own column wraps onto a second
+    // line (#1345), then is shortened to an ellipsis instead of overlapping
+    // the next one (#351); the full text is still there on hover, via
+    // `<title>` (only when actually shortened). The column's own natural
+    // width (`nat`) already hugs its header/cell text with only a little
+    // padding, so fitting right up to that same width would still leave
+    // adjacent headers touching edge to edge — an explicit gutter (one
+    // text-size's worth) keeps a visible gap, on either side, whichever
+    // side a right-aligned (numeric) header grows into.
+    let gutter = 11.0;
+    let heads: Vec<(Vec<String>, bool)> = cols
+        .iter()
+        .enumerate()
+        .map(|(k, c)| header_lines(&c.p.head, (widths[k] - gutter).max(10.0)))
+        .collect();
+    // a two-line header makes the header band one line taller
+    let head_extra = if heads.iter().any(|(l, _)| l.len() > 1) {
+        HEAD_LINE
+    } else {
+        0.0
+    };
     let subtitle = subtitle_of(rows, roles);
+    // #1345: a long title wraps (up to three lines) instead of being cut
+    let title_lines = title.map_or_else(Vec::new, |t| title_lines(t, w - 24.0));
+    let title_extra = 18.0 * title_lines.len().saturating_sub(1) as f64;
     let top = if title.is_some() { 30.0 } else { 10.0 }
-        + if subtitle.is_some() { SUBTITLE_H } else { 0.0 };
+        + title_extra
+        + if subtitle.is_some() { SUBTITLE_H } else { 0.0 }
+        + head_extra;
     // #457: a nested sparkline/sparkbar panel can't be asked for less than
     // `SPARKLINE_MIN_H` (50px, see its doc comment on ggplot-rs's own
     // layout floor) without clipping the line's low points (or, for
@@ -2336,41 +2438,34 @@ fn table_svg(
         "<g font-family=\"{}\" font-size=\"12\">",
         esc(&th.font.family)
     ));
-    if let Some(t) = title {
+    for (i, t) in title_lines.iter().enumerate() {
         s.push_str(&format!(
-            "<text x=\"12\" y=\"20\" font-size=\"14\" font-weight=\"700\" fill=\"{}\">{}</text>",
+            "<text x=\"12\" y=\"{y:.0}\" font-size=\"14\" font-weight=\"700\" fill=\"{}\">{}</text>",
             hex(th.colors.heading),
-            esc(&fit_title(t, w - 24.0))
+            esc(t),
+            y = 20.0 + 18.0 * i as f64,
         ));
     }
     if let Some(sb) = &subtitle {
+        s.push_str(&format!("<g transform=\"translate(0,{title_extra:.0})\">"));
         s.push_str(&subtitle_svg(sb, 12.0, w, ropts));
+        s.push_str("</g>");
     }
-    // header — a header wider than its own column is shortened to an
-    // ellipsis instead of overlapping the next one (#351); the full text is
-    // still there on hover, via `<title>` (only when actually shortened, so
-    // a dashboard with no long headers renders byte-identical to before).
-    // The column's own natural width (`nat`) already hugs its header/cell
-    // text with only a little padding, so truncating right up to that same
-    // width would still leave adjacent headers touching edge to edge — an
-    // explicit gutter (one text-size's worth) keeps a visible gap, on
-    // either side, whichever side a right-aligned (numeric) header grows
-    // into.
-    let gutter = 11.0;
-    for (k, c) in cols.iter().enumerate() {
+    for (k, (lines, cut)) in heads.iter().enumerate() {
         let (x, a) = anchor(k);
-        let avail = (widths[k] - gutter).max(10.0);
-        let short = truncate_header(&c.p.head, 11.0, avail);
-        let shown = short.as_deref().unwrap_or(&c.p.head);
-        let title = match &short {
-            Some(_) => format!("<title>{}</title>", esc(&c.p.head)),
-            None => String::new(),
+        let title = if *cut {
+            format!("<title>{}</title>", esc(&cols[k].p.head))
+        } else {
+            String::new()
         };
-        s.push_str(&format!(
-            "<text x=\"{x:.1}\" y=\"{y:.0}\" text-anchor=\"{a}\" font-size=\"11\" font-weight=\"600\" fill=\"{muted}\">{}{title}</text>",
-            esc(shown),
-            y = top + 16.0
-        ));
+        // bottom-aligned: a one-line header sits on the last line
+        for (i, line) in lines.iter().enumerate() {
+            let y = top + 16.0 - (lines.len() - 1 - i) as f64 * HEAD_LINE;
+            s.push_str(&format!(
+                "<text x=\"{x:.1}\" y=\"{y:.0}\" text-anchor=\"{a}\" font-size=\"11\" font-weight=\"600\" fill=\"{muted}\">{}{title}</text>",
+                esc(line),
+            ));
+        }
     }
     s.push_str(&format!(
         "<line x1=\"12\" y1=\"{ly:.0}\" x2=\"{x2:.0}\" y2=\"{ly:.0}\" stroke=\"{muted}\" stroke-width=\"1.5\"/>",
@@ -2912,26 +3007,52 @@ pub fn caption_html(
         return None;
     }
     let cols = crate::sql::result_columns(rows);
-    let text = markdown_fill(&caption_text(&cols, roles)?, &cols, &o.locale);
-    // plain text, as the static ::MARKDOWN boxes draw it (no wrapping here:
-    // the page's CSS wraps); an empty line ends a paragraph
-    let mut paras = String::new();
-    let mut cur: Vec<String> = Vec::new();
-    let flush = |cur: &mut Vec<String>, paras: &mut String| {
-        if !cur.is_empty() {
-            paras.push_str(&format!("<p>{}</p>", cur.join(" ")));
-            cur.clear();
-        }
+    let html = markdown_html(&caption_text(&cols, roles)?, &cols, o);
+    Some(format!("<div class=\"dp-caption md-body\">{html}</div>"))
+}
+
+/// A ::MARKDOWN text as HTML for a static page (#1345): the browser's own
+/// rendering (`crate::markdown_html`), its `{{values}}` filled from `rows`,
+/// a formula as readable text, an image inlined from the dashboard's
+/// `assets/` (or a `data:` URI) — never fetched from elsewhere, so an
+/// `https:` image shows its alt text.
+pub fn markdown_html(md: &str, rows: &[(String, Vec<Value>)], o: &RenderOptions) -> String {
+    let mut budget = MD_IMAGE_BUDGET_BYTES;
+    let root = o.asset_root.as_deref();
+    let mut image = |src: &str| md_image(src, root, &mut budget).map(|(href, _)| href);
+    let mut mo = crate::markdown_html::Opts {
+        breaks: false,
+        tex_text: true,
+        image: &mut image,
     };
-    for line in markdown_lines(&text, 1e9) {
-        match line {
-            MdLine::Text(t) if t.is_empty() => flush(&mut cur, &mut paras),
-            MdLine::Text(t) => cur.push(esc(&t)),
-            MdLine::Image { .. } => {}
-        }
-    }
-    flush(&mut cur, &mut paras);
-    Some(format!("<div class=\"dp-caption\">{paras}</div>"))
+    crate::markdown_html::render_with_values(md, rows, &o.locale, &mut mo)
+}
+
+/// A ::MARKDOWN panel's content for a static page (#1345), if it is one:
+/// its ::TITLE bar and its text as HTML (`markdown_html`) — a 'details'
+/// ::MARKDOWN_TONE folds it, open, under its label (`fold`).
+pub fn markdown_panel_html(
+    rows: &[serde_json::Map<String, serde_json::Value>],
+    roles: &[(usize, Role)],
+    fold: Option<&str>,
+    o: &RenderOptions,
+) -> Option<String> {
+    let cols = crate::sql::result_columns(rows);
+    let md = markdown_text(&cols, roles)?;
+    let title = title_of(&cols, roles)
+        .map(|t| format!("<figcaption class=\"panel-title\">{}</figcaption>", esc(&t)))
+        .unwrap_or_default();
+    let body = format!(
+        "<div class=\"md-body\">{}</div>",
+        markdown_html(&md, &cols, o)
+    );
+    Some(match fold {
+        Some(label) => format!(
+            "{title}<details class=\"md-details\" open><summary>{}</summary>{body}</details>",
+            esc(label)
+        ),
+        None => format!("{title}{body}"),
+    })
 }
 
 /// Caption text size and line height (smaller than a ::MARKDOWN box's 13 px
@@ -3075,6 +3196,18 @@ fn panel_chrome(
 /// `{{…}}` placeholder (a `$…$` TeX formula, `**bold**`, …), is left exactly
 /// as written for `markdown_lines` below to handle (#327).
 pub(crate) fn markdown_fill(md: &str, rows: &[(String, Vec<Value>)], l: &Locale) -> String {
+    markdown_fill_with(md, rows, l, &mut |v| v)
+}
+
+/// [`markdown_fill`], with each filled value passed through `put` (the
+/// static HTML export puts an inert token in its place, filled in after the
+/// Markdown is rendered — `crate::markdown_html::render_with_values`).
+pub(crate) fn markdown_fill_with(
+    md: &str,
+    rows: &[(String, Vec<Value>)],
+    l: &Locale,
+    put: &mut dyn FnMut(String) -> String,
+) -> String {
     let keys: Vec<&String> = rows.iter().map(|(n, _)| n).collect();
     let mut out = String::new();
     let mut rest = md;
@@ -3105,7 +3238,7 @@ pub(crate) fn markdown_fill(md: &str, rows: &[(String, Vec<Value>)], l: &Locale)
             .and_then(|(_, vs)| vs.first())
             .map(|v| md_format_value(v, spec, l));
         match filled {
-            Some(text) => out.push_str(&text),
+            Some(text) => out.push_str(&put(text)),
             None => {
                 out.push_str("{{");
                 out.push_str(inner);

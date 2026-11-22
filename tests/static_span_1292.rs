@@ -33,8 +33,9 @@ fn span_and_height_size_a_panel_on_the_html_page() {
     let body = std::fs::read_to_string(&html).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
     assert!(body.contains("class=\"grid dp-spans\""));
-    // 8 of 12 columns: 78 × 8 − 8 = 616 wide, half as high
+    // 8 of 12 columns at their width on the page grid (#1345): 869 wide,
+    // half as high
     let fig = body.split("<figure ").nth(1).expect("a panel");
     assert!(fig.starts_with("class=\"panel dp-span-8\""), "{fig}");
-    assert!(fig.contains("viewBox=\"0 0 616 308\""), "{}", &fig[..300]);
+    assert!(fig.contains("viewBox=\"0 0 869 435\""), "{}", &fig[..300]);
 }

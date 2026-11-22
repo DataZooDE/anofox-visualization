@@ -714,8 +714,9 @@ fn cmd_render(args: &[String]) {
     println!("wrote {out} ({n} panels) — open it in a browser");
 }
 
-/// A queued tab marker's prefix (#1345): `\u{1}tab:` + `t` (a ::TAB) or `s`
-/// (a ::SUBTAB) + its name, in place of a panel's ready HTML.
+/// A queued marker's prefix (#1345), in place of a panel's ready HTML:
+/// `\u{1}tab:` + `t` (a ::TAB), `s` (a ::SUBTAB) or `n` (an input's note) +
+/// its name.
 const TAB_MARK: &str = "\u{1}tab:";
 
 /// Render one annotated dashboard script to a self-contained HTML page, in
@@ -836,6 +837,9 @@ fn render_dashboard_html(
         // An input renders nothing in the static output, but binds its default
         // (as the browser does on first load) for the getvariable() panels.
         if let Some(kind) = inputs::input_kind(&p.roles) {
+            // #1345: in its place a note names the choice the page shows
+            let mut shown = Vec::new();
+            let mut label = None;
             if let Ok(rows) = exec(&format!("{};", p.sql)) {
                 // #435: sent to the session right away instead of a
                 // prelude text to replay before later statements.
@@ -845,8 +849,36 @@ fn render_dashboard_html(
                 );
                 for set in inputs::input_defaults_with(kind, idx, def, &rows) {
                     let _ = exec(&format!("{set};"));
+                    if let Some((_, v)) = set.split_once(" = ") {
+                        shown.push(v.trim().trim_matches('\'').replace("''", "'"));
+                    }
                 }
+                let col = p
+                    .roles
+                    .iter()
+                    .find(|(_, r)| *r == Role::Label)
+                    .map(|(i, _)| *i);
+                label = col
+                    .and_then(|i| rows.first().and_then(|r| r.values().nth(i).cloned()))
+                    .and_then(|v| v.as_str().map(str::to_string));
             }
+            let label = label
+                .or_else(|| {
+                    let col = inputs::input_index(&p.roles);
+                    p.names
+                        .iter()
+                        .find(|(i, _)| *i == col)
+                        .map(|(_, n)| n.clone())
+                })
+                .unwrap_or_default();
+            let mark = format!("{TAB_MARK}n{label}\u{1}{}", shown.join(", "));
+            queried.push((
+                p,
+                Ok(Vec::new()),
+                false,
+                Some(mark),
+                std::mem::take(&mut slot),
+            ));
             continue;
         }
         if let Some(r) = p
@@ -1019,10 +1051,17 @@ fn render_dashboard_html(
         let shown: Vec<&sql::Panel> = queried.iter().map(|(p, ..)| p).collect();
         sql::steps::StaticSteps::new(&shown)
     };
+    // a page with any ::SPAN lays its panels on the 12-column grid (#1345)
+    let spans = queried.iter().any(|(.., slot)| slot.span.is_some());
+    // #1345: each panel also drawn at phone width, unless the page fits its
+    // panels to the window (its layout needs the drawing as the card's last
+    // child)
+    let fit = page::static_fit(&sql::plan(script));
+    let phone = !fit;
     let mut queried = queried.into_iter().peekable();
     let mut in_tab = false;
     while let Some((p, rows, compact, static_html, slot)) = queried.next() {
-        let (pw, ph) = slot.size();
+        let (pw, ph) = slot.size(spans);
         let span = slot.class();
         if let Some(html) = static_html {
             // a tab's marker (#1345): opens its section, a sub-tab's a heading
@@ -1031,6 +1070,10 @@ fn render_dashboard_html(
                     ("t", label) => {
                         panels.push_str(&page::tab_open(label, in_tab));
                         in_tab = true;
+                    }
+                    ("n", note) => {
+                        let (label, shown) = note.split_once('\u{1}').unwrap_or((note, ""));
+                        panels.push_str(&page::input_note(label, shown));
                     }
                     (_, label) => panels.push_str(&format!(
                         "<h3 class=\"section dp-subtab\">{}</h3>",
@@ -1091,8 +1134,15 @@ fn render_dashboard_html(
         }
         // A contract plot call: one figure per result row (GROUP BY key).
         if let Some(cp) = &p.contract {
+            let narrow = if phone {
+                sql::contract_call::render_rows_opts(cp, &rows, page::PHONE_PX, ph, &opts)
+            } else {
+                Vec::new()
+            };
+            let mut narrow = narrow.into_iter();
             for (_, r) in sql::contract_call::render_rows_opts(cp, &rows, pw, ph, &opts) {
-                let svg = r.unwrap_or_else(|e| error_pre(&format!("error: {e}")));
+                let wide = r.unwrap_or_else(|e| error_pre(&format!("error: {e}")));
+                let svg = page::with_phone(wide, narrow.next().and_then(|(_, r)| r.ok()));
                 panels.push_str(&format!("<figure class=\"panel{span}\">{svg}</figure>"));
                 n += 1;
             }
@@ -1173,29 +1223,6 @@ fn render_dashboard_html(
         // see most of its columns — the same raw, name-keyed rows `--svg`
         // and `serve` already read instead, through the shared table
         // renderer (`dashboard::render_panel_doc_svg`).
-        let svg = if p
-            .roles
-            .iter()
-            .any(|(_, r)| matches!(r, Role::Table | Role::Record | Role::PagedTable))
-        {
-            let named_rows = sql::result_columns(&rows);
-            dashboard::render_panel_doc_svg(
-                &named_rows,
-                &p.roles,
-                &p.names,
-                pw as f64,
-                ph as f64,
-                &opts,
-                false,
-                &tracks,
-                None,
-                compact,
-            )
-        } else {
-            // Its ::TITLE bar, as on a dashboard card (#232).
-            render_with_title(&cols, &tracks, pw, ph, &opts)
-                .unwrap_or_else(|e| error_pre(&format!("error: {e}")))
-        };
         // #536: a ::MARKDOWN panel's chrome — same resolution as the
         // browser's resolveMdChrome(), drawn through the same CSS classes
         // (web/theme-base.css, embedded in this page by `page::render`).
@@ -1206,18 +1233,72 @@ fn render_dashboard_html(
                 .and_then(|v| v.as_str())
                 .map(str::to_string)
         };
-        let (class, icon_attrs) = if p.roles.iter().any(|(_, r)| matches!(r, Role::Markdown)) {
-            let callout = p
-                .roles
+        let is_md = p.roles.iter().any(|(_, r)| matches!(r, Role::Markdown));
+        let callout = p
+            .roles
+            .iter()
+            .any(|(_, r)| matches!(r, Role::Callout))
+            .then(|| text_of(Role::Callout).unwrap_or_default());
+        let md_chrome = |default: Option<&str>| {
+            roles::resolve_markdown_chrome(
+                text_of(Role::MarkdownStyle).as_deref(),
+                callout.is_some(),
+                text_of(Role::MarkdownTone).as_deref(),
+                default,
+            )
+        };
+        // a 'details' tone (#691) folds the text under its label, shown open
+        let fold = match md_chrome(md_default.as_deref()).1 {
+            Some(("details", label)) => Some(label.unwrap_or_else(|| "Details".into())),
+            _ => None,
+        };
+        // #1345: a ::MARKDOWN text as HTML, by the browser's own rules
+        let md_html = is_md
+            .then(|| dashboard::markdown_panel_html(&rows, &p.roles, fold.as_deref(), &opts))
+            .flatten();
+        // the panel drawn at `w` wide (`h` high, a table all its rows)
+        let draw = |w: u32, h: u32| {
+            if p.roles
                 .iter()
-                .any(|(_, r)| matches!(r, Role::Callout))
-                .then(|| text_of(Role::Callout).unwrap_or_default());
-            roles::markdown_figure_attrs(
+                .any(|(_, r)| matches!(r, Role::Table | Role::Record | Role::PagedTable))
+            {
+                let named_rows = sql::result_columns(&rows);
+                // #1345: all its rows (up to a cap) unless its ::HEIGHT says
+                let h = match slot.height {
+                    Some(_) => h,
+                    None => dashboard::static_table_height(&named_rows, &p.roles, w as f64),
+                };
+                dashboard::render_panel_doc_svg(
+                    &named_rows,
+                    &p.roles,
+                    &p.names,
+                    w as f64,
+                    h as f64,
+                    &opts,
+                    false,
+                    &tracks,
+                    None,
+                    compact,
+                )
+            } else {
+                // Its ::TITLE bar, as on a dashboard card (#232).
+                render_with_title(&cols, &tracks, w, h, &opts)
+                    .unwrap_or_else(|e| error_pre(&format!("error: {e}")))
+            }
+        };
+        let svg = match md_html {
+            Some(html) => html,
+            None => page::with_phone(draw(pw, ph), phone.then(|| page::phone_drawing(draw, ph))),
+        };
+        let (class, icon_attrs) = if is_md {
+            let (class, attrs) = roles::markdown_figure_attrs(
                 text_of(Role::MarkdownStyle).as_deref(),
                 callout.as_deref(),
                 text_of(Role::MarkdownTone).as_deref(),
                 md_default.as_deref(),
-            )
+            );
+            // a folded text's label is its <summary>, not a tone label
+            (class, if fold.is_some() { String::new() } else { attrs })
         } else {
             ("panel".to_string(), String::new())
         };
@@ -1248,7 +1329,7 @@ fn render_dashboard_html(
         head_extra: String::new(),
         controls_html: String::new(),
         panels_html: panels,
-        fit: page::static_fit(&sql::plan(script)),
+        fit,
     });
     (html, n)
 }

@@ -48,6 +48,7 @@ pub mod kpi;
 pub mod lint;
 pub mod macros;
 pub(crate) mod map;
+pub mod markdown_html;
 pub mod math;
 #[doc(hidden)]
 pub mod module;
@@ -1954,6 +1955,25 @@ fn render_titled(
     Ok(with_warnings_attr(svg, &warnings, o.record_warnings))
 }
 
+/// A wrapped title bar's extra height per line (#1345).
+const TITLE_LINE_H: u32 = 18;
+
+/// A static page's wrapped `::TITLE` bar (#1345): one line of
+/// [`title_bar_text`]'s look per line, 18 px apart.
+fn title_bar_lines(lines: &[String], o: &RenderOptions) -> String {
+    lines
+        .iter()
+        .enumerate()
+        .map(|(i, l)| {
+            title_bar_text(l, None, o).replacen(
+                "y=\"20\"",
+                &format!("y=\"{}\"", 20 + TITLE_LINE_H as usize * i),
+                1,
+            )
+        })
+        .collect()
+}
+
 /// The `::TITLE` bar's text as a dashboard card draws it
 /// (`dashboard::render_panel_svg`), the title XML-escaped.
 pub(crate) fn title_bar_text(title: &str, fit: Option<u32>, o: &RenderOptions) -> String {
@@ -1989,10 +2009,14 @@ pub fn render_with_title(
     o: &RenderOptions,
 ) -> Result<String, RenderError> {
     let title = panel_title(cols, o).map(cap_page_title);
+    // #1345: a title too long for the bar wraps (up to three lines) instead
+    // of being cut; the bar grows a line at a time, the chart gives way
+    let lines = title.as_deref().map_or_else(Vec::new, |t| {
+        dashboard::title_lines(t, clamp_dim(width as u64) as f64 - 28.0)
+    });
+    let bar_h = TITLE_BAR_H + TITLE_LINE_H * lines.len().saturating_sub(1) as u32;
     let h = if title.is_some() {
-        clamp_dim(height as u64)
-            .saturating_sub(TITLE_BAR_H)
-            .max(MIN_DIM)
+        clamp_dim(height as u64).saturating_sub(bar_h).max(MIN_DIM)
     } else {
         height
     };
@@ -2002,10 +2026,10 @@ pub fn render_with_title(
         track::render_stack(cols, tracks, width, h, o)?.concat()
     };
     Ok(match title {
-        Some(t) => format!(
+        Some(_) => format!(
             "{open}{text}</svg>{chart}",
-            open = svg_open(Place::Doc, clamp_dim(width as u64), TITLE_BAR_H),
-            text = title_bar_text(&t, Some(clamp_dim(width as u64)), o),
+            open = svg_open(Place::Doc, clamp_dim(width as u64), bar_h),
+            text = title_bar_lines(&lines, o),
         ),
         None => chart,
     })
