@@ -7,13 +7,15 @@
 //! deliberately slow statement must run that statement once — with the old
 //! replay-per-statement approach, the total time would scale with the panel
 //! count (≈ 20 × the slow statement's own time); with one session, it does
-//! not. A generous threshold (`BUDGET`) keeps this robust on a slow CI
-//! runner while still clearly separating "ran once" from "ran ~20 times".
+//! not. The threshold is relative: the same command on a 1-panel script,
+//! timed on the same machine just before, sets it (`within_budget`), so a
+//! slow or busy CI runner slows both runs alike (#1342: an absolute 5 s
+//! budget failed at 5.3 s on one), while "ran ~20 times" still fails loudly.
 //! Needs the `duckdb` CLI (skips without it locally, fails on CI — see
 //! `common::skip_without`).
 mod common;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
@@ -49,12 +51,6 @@ impl Drop for Scratch {
 const SLOW_SETUP: &str =
     "CREATE TEMP TABLE slow_setup AS SELECT sum(a.i * b.i) AS n FROM range(15000) a(i), range(15000) b(i);";
 
-/// A generous ceiling: comfortably above one run of `SLOW_SETUP` plus 20
-/// trivial round trips (observed total: well under 1.5s), but far below
-/// what 20 replays of it would take (~14s+) — any regression back to
-/// per-panel replay fails this loudly rather than just "being slower".
-const BUDGET: Duration = Duration::from_secs(5);
-
 /// `N` panels, each a trivial KPI reading `slow_setup` — cheap on their own,
 /// so the render's total time is dominated by how many times `SLOW_SETUP`
 /// itself actually ran.
@@ -69,37 +65,61 @@ fn script_with_n_panels(n: usize) -> String {
     s
 }
 
+/// Runs `make(script)` on an `n`-panel script and returns how long it took
+/// (and its stdout); `make` builds the command, writing any output next to
+/// the script.
+fn timed(tag: &str, n: usize, make: &dyn Fn(&Path) -> Command) -> (Duration, Vec<u8>) {
+    let s = Scratch::new(&format!("{tag}-{n}"));
+    let sql = s.0.join("w.sql");
+    std::fs::write(&sql, script_with_n_panels(n)).unwrap();
+    let start = Instant::now();
+    let run = make(&sql).output().unwrap();
+    let elapsed = start.elapsed();
+    assert!(
+        run.status.success(),
+        "{tag} ({n} panels) stderr: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let out = sql.with_extension("out");
+    let body = std::fs::read(&out).unwrap_or(run.stdout);
+    (elapsed, body)
+}
+
+/// 20 panels must cost far less than 20 × one panel: at most 4 × the
+/// 1-panel run plus 1 s of fixed overhead. Running the slow setup once per
+/// panel would take ~20 × as long, on any machine.
+fn within_budget(tag: &str, make: &dyn Fn(&Path) -> Command) -> Vec<u8> {
+    let (one, _) = timed(tag, 1, make);
+    let (twenty, body) = timed(tag, 20, make);
+    let budget = one * 4 + Duration::from_secs(1);
+    assert!(
+        twenty < budget,
+        "{tag}: 20 panels took {twenty:?}, 1 panel {one:?} (budget {budget:?}) — the slow setup \
+         statement looks like it ran more than once"
+    );
+    body
+}
+
+fn dashboard() -> Command {
+    Command::new(env!("CARGO_BIN_EXE_dashboard"))
+}
+
 #[test]
 fn render_html_runs_slow_setup_once_for_20_panels() {
     if !have_duckdb("render_html_runs_slow_setup_once_for_20_panels") {
         return;
     }
-    let s = Scratch::new("render-once");
-    let (sql, out) = (s.0.join("w.sql"), s.0.join("w.html"));
-    std::fs::write(&sql, script_with_n_panels(20)).unwrap();
-    let start = Instant::now();
-    let run = Command::new(env!("CARGO_BIN_EXE_dashboard"))
-        .arg(&sql)
-        .arg(&out)
-        .output()
-        .unwrap();
-    let elapsed = start.elapsed();
-    assert!(
-        run.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&run.stderr)
-    );
-    let html = std::fs::read_to_string(&out).unwrap();
+    let html = within_budget("render-once", &|sql| {
+        let mut c = dashboard();
+        c.arg(sql).arg(sql.with_extension("out"));
+        c
+    });
+    let html = String::from_utf8_lossy(&html);
     assert!(
         !html.contains("does not exist") && !html.contains("Catalog Error"),
         "{html}"
     );
     assert!(html.contains("20 panels"), "{html}");
-    assert!(
-        elapsed < BUDGET,
-        "render took {elapsed:?} (budget {BUDGET:?}) — the slow setup statement looks like it \
-         ran more than once (20 panels × its own time would take far longer than this budget)"
-    );
 }
 
 #[test]
@@ -107,29 +127,13 @@ fn svg_runs_slow_setup_once_for_20_panels() {
     if !have_duckdb("svg_runs_slow_setup_once_for_20_panels") {
         return;
     }
-    let s = Scratch::new("svg-once");
-    let (sql, out) = (s.0.join("w.sql"), s.0.join("w.svg"));
-    std::fs::write(&sql, script_with_n_panels(20)).unwrap();
-    let start = Instant::now();
-    let run = Command::new(env!("CARGO_BIN_EXE_dashboard"))
-        .arg("--svg")
-        .arg(&sql)
-        .arg(&out)
-        .output()
-        .unwrap();
-    let elapsed = start.elapsed();
-    assert!(
-        run.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&run.stderr)
-    );
-    let svg = std::fs::read_to_string(&out).unwrap();
+    let svg = within_budget("svg-once", &|sql| {
+        let mut c = dashboard();
+        c.arg("--svg").arg(sql).arg(sql.with_extension("out"));
+        c
+    });
+    let svg = String::from_utf8_lossy(&svg);
     assert!(svg.starts_with("<svg"), "{svg}");
-    assert!(
-        elapsed < BUDGET,
-        "render took {elapsed:?} (budget {BUDGET:?}) — the slow setup statement looks like it \
-         ran more than once"
-    );
 }
 
 /// `dashboard --check` replays the identical growing prelude `check_opts`
@@ -143,38 +147,23 @@ fn check_runs_slow_setup_once_for_20_panels() {
     if !have_duckdb("check_runs_slow_setup_once_for_20_panels") {
         return;
     }
-    let s = Scratch::new("check-once");
-    let sql = s.0.join("w.sql");
-    std::fs::write(&sql, script_with_n_panels(20)).unwrap();
-    let start = Instant::now();
-    let run = Command::new(env!("CARGO_BIN_EXE_dashboard"))
-        .arg("--check")
-        .arg(&sql)
-        .output()
-        .unwrap();
-    let elapsed = start.elapsed();
-    assert!(
-        run.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&run.stderr)
-    );
-    assert!(
-        elapsed < BUDGET,
-        "check took {elapsed:?} (budget {BUDGET:?}) — the slow setup statement looks like it \
-         ran more than once"
-    );
+    within_budget("check-once", &|sql| {
+        let mut c = dashboard();
+        c.arg("--check").arg(sql);
+        c
+    });
 }
 
-/// The same budget check against a prebuilt `--db` (read-only), the other
-/// session shape `--check` supports — a `CREATE TEMP TABLE` setup statement
-/// still runs (TEMP objects are never part of the read-only, on-disk
-/// catalog `-readonly` protects).
+/// The same check against a prebuilt `--db` (read-only), the other session
+/// shape `--check` supports — a `CREATE TEMP TABLE` setup statement still
+/// runs (TEMP objects are never part of the read-only, on-disk catalog
+/// `-readonly` protects).
 #[test]
 fn check_with_db_runs_slow_setup_once_for_20_panels() {
     if !have_duckdb("check_with_db_runs_slow_setup_once_for_20_panels") {
         return;
     }
-    let s = Scratch::new("check-db-once");
+    let s = Scratch::new("check-db");
     let db = s.0.join("w.duckdb");
     let out = Command::new("duckdb")
         .arg(&db)
@@ -187,25 +176,9 @@ fn check_with_db_runs_slow_setup_once_for_20_panels() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let sql = s.0.join("w.sql");
-    std::fs::write(&sql, script_with_n_panels(20)).unwrap();
-    let start = Instant::now();
-    let run = Command::new(env!("CARGO_BIN_EXE_dashboard"))
-        .arg("--check")
-        .arg(&sql)
-        .arg("--db")
-        .arg(&db)
-        .output()
-        .unwrap();
-    let elapsed = start.elapsed();
-    assert!(
-        run.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&run.stderr)
-    );
-    assert!(
-        elapsed < BUDGET,
-        "check --db took {elapsed:?} (budget {BUDGET:?}) — the slow setup statement looks like \
-         it ran more than once"
-    );
+    within_budget("check-db-once", &|sql| {
+        let mut c = dashboard();
+        c.arg("--check").arg(sql).arg("--db").arg(&db);
+        c
+    });
 }
