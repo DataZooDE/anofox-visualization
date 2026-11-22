@@ -4,6 +4,7 @@ SET memory_limit = '24GB';
 
 CREATE OR REPLACE MACRO label(m) AS CASE m
   WHEN 'perpetual' THEN 'one global model (anofox_ml)'
+  WHEN 'lgbm' THEN 'LightGBM, the winner''s settings (anofox_ml)'
   WHEN 'naive' THEN 'the last day (Naive)'
   WHEN 'sma28' THEN 'mean of the last 28 days'
   WHEN 'snaive7' THEN 'same weekday last week' END;
@@ -44,7 +45,7 @@ COPY (WITH s AS (
       FROM dm_pooled p JOIN c USING (baseline, metric) ORDER BY metric, baseline) TO 'data/m5/tests.parquet' (COMPRESSION zstd);
 
 COPY (SELECT metric, label(models[i]) AS method, list_contains(mcs.included_models, i) AS in_set, mcs.mcs_p_values[i] AS mcs_p_value
-      FROM mcs, range(1, 5) r(i) ORDER BY metric, mcs_p_value DESC) TO 'data/m5/mcs.parquet' (COMPRESSION zstd);
+      FROM mcs, range(1, len(models) + 1) r(i) ORDER BY metric, mcs_p_value DESC) TO 'data/m5/mcs.parquet' (COMPRESSION zstd);
 
 -- one row per series: its sales in the test days and each method's errors
 COPY (WITH e AS (SELECT method, id, avg(ae) AS mae, avg(crps) AS crps FROM loss GROUP BY ALL),
