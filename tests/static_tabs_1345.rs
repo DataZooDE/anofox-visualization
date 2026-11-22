@@ -107,3 +107,29 @@ fn without_tabs_the_page_stays_flat() {
         "no @title: the fallback"
     );
 }
+
+#[test]
+fn an_input_leaves_a_note_with_the_choice_shown() {
+    let script = "SELECT r AS region ::DROPDOWN, 'Region'::LABEL FROM (VALUES ('North'), ('South')) t(r) ORDER BY r;\n\
+SELECT n AS size ::DROPDOWN FROM (VALUES ('large')) t(n);\n\
+SELECT 1::METRIC, 'one'::LABEL;\n";
+    let Some(html) = render("inputs", script) else {
+        return;
+    };
+    assert!(
+        html.contains(
+            "<p class=\"dp-input-note\"><b>Region</b>: this page shows <b>North</b>, the default"
+        ),
+        "{html}"
+    );
+    // without a ::LABEL, the input's own name
+    assert!(
+        html.contains("<b>size</b>: this page shows <b>large</b>, the default"),
+        "{html}"
+    );
+    // notes don't count as panels
+    assert!(
+        html.contains("· 1 panels") || html.contains("· 1 panel"),
+        "{html}"
+    );
+}

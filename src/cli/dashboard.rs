@@ -714,8 +714,9 @@ fn cmd_render(args: &[String]) {
     println!("wrote {out} ({n} panels) — open it in a browser");
 }
 
-/// A queued tab marker's prefix (#1345): `\u{1}tab:` + `t` (a ::TAB) or `s`
-/// (a ::SUBTAB) + its name, in place of a panel's ready HTML.
+/// A queued marker's prefix (#1345), in place of a panel's ready HTML:
+/// `\u{1}tab:` + `t` (a ::TAB), `s` (a ::SUBTAB) or `n` (an input's note) +
+/// its name.
 const TAB_MARK: &str = "\u{1}tab:";
 
 /// Render one annotated dashboard script to a self-contained HTML page, in
@@ -836,6 +837,9 @@ fn render_dashboard_html(
         // An input renders nothing in the static output, but binds its default
         // (as the browser does on first load) for the getvariable() panels.
         if let Some(kind) = inputs::input_kind(&p.roles) {
+            // #1345: in its place a note names the choice the page shows
+            let mut shown = Vec::new();
+            let mut label = None;
             if let Ok(rows) = exec(&format!("{};", p.sql)) {
                 // #435: sent to the session right away instead of a
                 // prelude text to replay before later statements.
@@ -845,8 +849,36 @@ fn render_dashboard_html(
                 );
                 for set in inputs::input_defaults_with(kind, idx, def, &rows) {
                     let _ = exec(&format!("{set};"));
+                    if let Some((_, v)) = set.split_once(" = ") {
+                        shown.push(v.trim().trim_matches('\'').replace("''", "'"));
+                    }
                 }
+                let col = p
+                    .roles
+                    .iter()
+                    .find(|(_, r)| *r == Role::Label)
+                    .map(|(i, _)| *i);
+                label = col
+                    .and_then(|i| rows.first().and_then(|r| r.values().nth(i).cloned()))
+                    .and_then(|v| v.as_str().map(str::to_string));
             }
+            let label = label
+                .or_else(|| {
+                    let col = inputs::input_index(&p.roles);
+                    p.names
+                        .iter()
+                        .find(|(i, _)| *i == col)
+                        .map(|(_, n)| n.clone())
+                })
+                .unwrap_or_default();
+            let mark = format!("{TAB_MARK}n{label}\u{1}{}", shown.join(", "));
+            queried.push((
+                p,
+                Ok(Vec::new()),
+                false,
+                Some(mark),
+                std::mem::take(&mut slot),
+            ));
             continue;
         }
         if let Some(r) = p
@@ -1031,6 +1063,10 @@ fn render_dashboard_html(
                     ("t", label) => {
                         panels.push_str(&page::tab_open(label, in_tab));
                         in_tab = true;
+                    }
+                    ("n", note) => {
+                        let (label, shown) = note.split_once('\u{1}').unwrap_or((note, ""));
+                        panels.push_str(&page::input_note(label, shown));
                     }
                     (_, label) => panels.push_str(&format!(
                         "<h3 class=\"section dp-subtab\">{}</h3>",

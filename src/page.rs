@@ -262,6 +262,23 @@ pub fn tab_open(label: &str, open: bool) -> String {
     )
 }
 
+/// An input's place on a static page (#1345): the page can't change it, so a
+/// note says it shows the dashboard's default choice.
+pub fn input_note(label: &str, shown: &str) -> String {
+    let (label, shown) = (label.trim(), shown.trim());
+    let what = if label.is_empty() {
+        String::new()
+    } else {
+        format!("<b>{}</b>: ", esc(label))
+    };
+    let choice = if shown.is_empty() || shown.eq_ignore_ascii_case("null") {
+        "this page shows the default choice".to_string()
+    } else {
+        format!("this page shows <b>{}</b>, the default", esc(shown))
+    };
+    format!("<p class=\"dp-input-note\">{what}{choice} — change it in the live dashboard</p>")
+}
+
 /// The tab bar uses the app's own `.tabbar` / `.tab-btn` styles (embedded with
 /// the theme's CSS); only the sections' behaviour and the print view are here.
 const TABS_CSS: &str = "section.dp-tab{display:contents}section.dp-tab[hidden]{display:none}\
