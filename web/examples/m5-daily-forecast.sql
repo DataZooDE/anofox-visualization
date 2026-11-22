@@ -13,7 +13,8 @@
 -- features for the model and forecasts the baselines (Naive, the mean of the
 -- last 28 days, the same weekday last week); anofox_ml fits one global
 -- PerpetualRegressor on all series; anofox_statistics tests the differences
--- (Diebold–Mariano, Model Confidence Set). Generated natively
+-- (Diebold–Mariano, Model Confidence Set). For comparison, anofox_ml's
+-- LgbmRegressor with the M5 winner's parameters. Generated natively
 -- (scripts/gen-m5-case.sh); this page reads the stored results in data/m5/.
 -- The settings were fixed before the test days were looked at.
 
@@ -29,8 +30,9 @@ CREATE OR REPLACE TEMP TABLE m5_info AS FROM read_parquet('data/m5/provenance.pa
 CREATE OR REPLACE TEMP TABLE m5_seeds AS FROM read_parquet('data/m5/seeds.parquet');
 -- short names for the legends
 CREATE OR REPLACE TEMP TABLE m5_short AS
-FROM (VALUES ('actual', 'actual'), ('perpetual', 'global model'), ('naive', 'last day'),
-             ('sma28', 'mean of 28 days'), ('snaive7', 'same weekday last week')) t(method, short);
+-- (capitalised: the legends sort by name, so actual comes first, then the global model)
+FROM (VALUES ('actual', 'Actual', 0), ('perpetual', 'Global model', 1), ('lgbm', 'LightGBM', 2), ('naive', 'Last day', 3),
+             ('sma28', 'Mean of 28 days', 4), ('snaive7', 'Same weekday last week', 5)) t(method, short, ord);
 
 SELECT 'The question'::TAB;
 
@@ -42,6 +44,9 @@ SELECT 'The 28 test days, May 23 to June 19, 2016 (as in the competition)'::GROU
 SELECT wrmsse::METRIC, 'WRMSSE of the global model'::LABEL,
        'WRMSSE: the competition''s score. The error of every series at 12 levels (total, states, stores, … items), scaled by how much the series moves from day to day and weighted by its dollar sales. Lower is better; 1 is about as good as yesterday''s sales.'::INFO
 FROM m5_methods WHERE method = 'perpetual';
+SELECT wrmsse::METRIC, 'LightGBM with the winner''s settings'::LABEL,
+       'For comparison: anofox_ml''s LgbmRegressor with the parameters of the competition winner''s LightGBM models, on the same rows and features.'::INFO
+FROM m5_methods WHERE method = 'lgbm';
 SELECT wrmsse::METRIC, 'best baseline: same weekday last week'::LABEL FROM m5_methods WHERE method = 'snaive7';
 SELECT wrmsse::METRIC, 'competition winner (YJ_STU)'::LABEL FROM m5_board WHERE name = 'YJ_STU';
 SELECT crps::METRIC, 'CRPS per item and day, global model'::LABEL,
@@ -52,13 +57,13 @@ SELECT 1::ENDGROUP;
 SELECT 12::COL;
 SELECT 340::HEIGHT;
 SELECT ds::XAXIS, short::CATEGORY, units AS "units sold" ::LINECHART,
-       'All 10 stores, units per day: the last 12 weeks and the four forecasts of the 28 test days'::TITLE
-FROM m5_totals JOIN m5_short USING (method) WHERE level = 1 ORDER BY ds, short;
+       'All 10 stores, units per day: the last 12 weeks and the five forecasts of the 28 test days'::TITLE
+FROM m5_totals JOIN m5_short USING (method) WHERE level = 1 ORDER BY ds, ord;
 
 SELECT 'Against the competition'::TAB;
 
 SELECT 4::COL;
-SELECT '**Better than every benchmark, short of the top 50.** The global model scores **0.618**: better than all 24 of the competition''s benchmarks (the best, bottom-up exponential smoothing, 0.671) and 27 % better than the same weekday last week (0.847). The winner scored 0.520 and the 50th of 5,507 teams 0.576, with ensembles of many tuned models.
+SELECT '**Better than every benchmark, short of the top 50.** The global model scores **0.618**: better than all 24 of the competition''s benchmarks (the best, bottom-up exponential smoothing, 0.671) and 27 % better than the same weekday last week (0.847). The winner scored 0.520 and the 50th of 5,507 teams 0.576, with ensembles of many tuned models. anofox_ml''s LightGBM with the winner''s parameters, on the same rows and features, scores **0.608**.
 
 **Scored as the organizers scored.** anofox_forecast''s Naive and seasonal-naive forecasts score exactly the competition''s own benchmark values, 1.752 and 0.847, and every weight agrees with the official file. The competition''s numbers are the organizers'' published scores (Makridakis, Spiliotis & Assimakopoulos 2022, *International Journal of Forecasting* 38(4); the score sheet in the M5-methods repository).'::MARKDOWN;
 
@@ -66,10 +71,10 @@ SELECT 8::COL;
 SELECT 620::HEIGHT;
 SELECT CASE WHEN kind = 'team' THEN '#' || rank || ' ' || name ELSE name END AS "method"::XAXIS, kind::CATEGORY,
        wrmsse AS "WRMSSE" ::BARCHART, 1::FLIP,
-       'WRMSSE, lower is better: top teams, the competition''s benchmarks and this page''s global model'::TITLE
+       'WRMSSE, lower is better: top teams, the competition''s benchmarks below 1 and this page''s two models'::TITLE
 FROM m5_board
-WHERE (kind = 'team' AND rank IN (1, 2, 3, 10, 25, 50)) OR (kind = 'benchmark' AND wrmsse < 1.2)
-   OR (kind = 'this case' AND name = 'one global model (anofox_ml)')
+WHERE (kind = 'team' AND rank IN (1, 2, 3, 10, 25, 50)) OR (kind = 'benchmark' AND wrmsse < 1)
+   OR (kind = 'this case' AND name IN ('one global model (anofox_ml)', 'LightGBM, the winner''s settings (anofox_ml)'))
 ORDER BY wrmsse;
 
 SELECT 4::COL;
@@ -86,7 +91,7 @@ SELECT 12::COL;
 SELECT 340::HEIGHT;
 SELECT lpad(level::VARCHAR, 2, '0') || ' ' || level_name AS "level"::XAXIS, short::CATEGORY, wrmsse AS "WRMSSE" ::BARCHART,
        'WRMSSE by level, lower is better: the global model gains most where items add up'::TITLE
-FROM m5_levels JOIN m5_short USING (method) ORDER BY level, short;
+FROM m5_levels JOIN m5_short USING (method) ORDER BY level, ord;
 
 SELECT 'Is it luck?'::TAB;
 
@@ -95,7 +100,9 @@ SELECT '**Where items add up, it is no luck.** On the competition''s score (the 
 
 **On single items the gain is small.** Against the mean of the last 28 days its CRPS is 0.7 % lower (significant) and its MAE 1.2 % lower (p = 0.07, not significant at 5 %). Series by series most items show no difference either way, and in MAE more are worse than better: a model of the expected demand forecasts a little above 0 for an item that usually sells nothing, while the absolute error rewards forecasting 0 itself.
 
-**The Model Confidence Set** (`model_confidence_set_agg`, 90 %) keeps only the global model, for all three losses.'::MARKDOWN;
+**Against LightGBM with the winner''s settings** the global model is level on WRMSSE (p = 0.54): better for all stores together, worse on single items, where LightGBM''s MAE is 1.3 % and its CRPS 0.9 % lower (both significant).
+
+**The Model Confidence Set** (`model_confidence_set_agg`, 90 %) keeps both models for WRMSSE and only LightGBM for MAE and CRPS; none of the baselines survives.'::MARKDOWN;
 
 SELECT 8::COL;
 SELECT metric_label AS "loss"::TABLE, baseline_label AS "against", gain_pct AS "global model's gain, %",
@@ -179,6 +186,7 @@ SELECT * FROM ts_forecast_by(''train'', id, ds, y, ''Naive'', 28, ''1d'', MAP{})
 SELECT * FROM ts_forecast_by(''train'', id, ds, y, ''SMA'', 28, ''1d'', MAP{''window'': ''28''});
 
 -- one global model from anofox_ml: 30,490 series, one year of rows, five seeds averaged
+-- (the comparison: ''LgbmRegressor'' with the winner''s parameters, three seeds)
 SELECT seed, ml_fit_agg(''PerpetualRegressor'', y, feats(ex),
          ''{"budget": 0.5, "objective": {"TweedieLoss": {"p": 1.5}}, "seed": '' || seed || ''}'' ORDER BY id, o, h) AS m
 FROM ex, range(7, 12) s(seed) WHERE o < 1941 GROUP BY seed;
