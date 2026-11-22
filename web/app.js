@@ -18816,7 +18816,10 @@ function assetUrl(p) {
 // the leading comments). An empty value removes the statement.
 // The first statement of `sql` casting to `roleName` (a RegExp match), or null.
 function chromeStmt(sql, roleName) {
-  const str = "'(?:[^']|'')*'";
+  // (?!'): a literal ends only where no quote follows, so `'a''b'` matches
+  // one way — as two adjacent literals it made the repetition below
+  // backtrack exponentially on long text with many '' (the M5 example hung)
+  const str = "'(?:[^']|'')*'(?!')";
   const re = new RegExp(`^[ \\t]*SELECT\\b(?:${str}|[^';])*?::\\s*${roleName}\\b(?:${str}|[^';])*(?:;|(?![\\s\\S]))`, "im");
   return String(sql ?? "").match(re);
 }

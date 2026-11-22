@@ -88,4 +88,15 @@ for (const ok of ["logo.svg", "/img/l.png", "https://x.test/l.png", "http://x.te
 for (const bad of ["", "javascript:alert(1)", "data:text/html,<b>", "ftp://x/l.png", "l'.png", "url(x)", "a\\b", "a\u0007b", "x".repeat(512001)])
   assert.ok(!chromeUrlOk(bad), bad.slice(0, 40));
 
+// A long text with many '' and no chrome role must not backtrack (#1341: the
+// M5 example's markdown hung chromeStmt — `'a''b'` also matched as two
+// literals, which made the statement's repetition exponential).
+{
+  const md = "SELECT '" + "it''s ".repeat(40) + "end'::MARKDOWN;\nSELECT 1::COL;\n";
+  const t = Date.now();
+  assert.equal(setChromeSql(md, "DASHBOARD_TITLE", ""), md);
+  assert.equal(setChromeSql(md + "SELECT 'Old'::DASHBOARD_TITLE;\n", "DASHBOARD_TITLE", "New"), md + "SELECT 'New'::DASHBOARD_TITLE;\n");
+  assert.ok(Date.now() - t < 1000, `setChromeSql took ${Date.now() - t} ms on 40 escaped quotes`);
+}
+
 console.log("chrome_edit_test ok");
