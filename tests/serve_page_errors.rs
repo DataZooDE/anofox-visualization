@@ -584,3 +584,50 @@ fn span_and_height_size_a_served_panel() {
     );
     drop(server);
 }
+
+/// #1353: the script-free page draws a ::MARKDOWN text as HTML by the app's
+/// rules (a code block, a list), shows every row of a table taller than the
+/// default card, and draws each chart at phone width too — as the CLI
+/// export does (#1345).
+#[test]
+fn a_served_page_has_markdown_html_full_tables_and_a_phone_drawing() {
+    if !have_duckdb("a_served_page_has_markdown_html_full_tables_and_a_phone_drawing") {
+        return;
+    }
+    let s = Scratch::new("md1353");
+    let dash = s.0.join("dash");
+    std::fs::create_dir_all(&dash).unwrap();
+    std::fs::write(
+        dash.join("notes.sql"),
+        "SELECT '- one\n- <b>two</b>\n\n```\nSELECT 1;\n```'::MARKDOWN;\n\
+         SELECT i AS n ::TABLE FROM range(20) t(i);\n\
+         SELECT 'a' AS x ::XAXIS, 1 AS y ::BARCHART;\n",
+    )
+    .unwrap();
+    let port = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let server = Kill(Some(
+        Command::new(env!("CARGO_BIN_EXE_serve"))
+            .arg("--dashboards")
+            .arg(&dash)
+            .args(["--port", &port.to_string(), "--no-open"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap(),
+    ));
+    let resp = http_get(port, "/d/notes");
+    assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
+    let body = http_body(&resp);
+    assert!(
+        body.contains("<div class=\"md-body\"><ul><li>one</li><li>&lt;b&gt;two&lt;/b&gt;</li></ul><pre><code>SELECT 1;\n</code></pre></div>"),
+        "{body}"
+    );
+    assert!(!body.contains("more rows"), "every table row shows: {body}");
+    assert!(body.contains(">19</text>"), "{body}");
+    assert!(body.contains("<svg class=\"dp-narrow\""), "{body}");
+    drop(server);
+}
