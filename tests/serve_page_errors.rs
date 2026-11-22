@@ -569,15 +569,16 @@ fn span_and_height_size_a_served_panel() {
         "{}",
         figs[0]
     );
+    // #1345: drawn at its width on the page's 12-column grid
     assert!(
-        figs[0].contains("viewBox=\"0 0 928 680\""),
+        figs[0].contains("viewBox=\"0 0 1334 680\""),
         "{}",
         &figs[0][..300]
     );
-    // the next panel is back to the default
+    // the next panel is back to the default: 6 of the 12 columns
     assert!(figs[1].starts_with("class=\"panel\""), "{}", figs[1]);
     assert!(
-        figs[1].contains("viewBox=\"0 0 460 300\""),
+        figs[1].contains("viewBox=\"0 0 637 300\""),
         "{}",
         &figs[1][..300]
     );
