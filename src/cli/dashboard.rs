@@ -714,6 +714,10 @@ fn cmd_render(args: &[String]) {
     println!("wrote {out} ({n} panels) — open it in a browser");
 }
 
+/// A queued tab marker's prefix (#1345): `\u{1}tab:` + `t` (a ::TAB) or `s`
+/// (a ::SUBTAB) + its name, in place of a panel's ready HTML.
+const TAB_MARK: &str = "\u{1}tab:";
+
 /// Render one annotated dashboard script to a self-contained HTML page, in
 /// one DuckDB session: every statement runs with everything before it
 /// (setup DDL, `SET VARIABLE`, `LOAD`, TEMP views/tables, input defaults)
@@ -944,6 +948,30 @@ fn render_dashboard_html(
             });
             continue;
         }
+        // #1345: a ::TAB / ::SUBTAB keeps its place — a marker for phase 2
+        // (TAB_MARK + the tab's name), which opens the tab's section.
+        if let Some(sub) = p.tab_kind() {
+            let col = p
+                .roles
+                .iter()
+                .position(|(_, r)| matches!(r, Role::Tab | Role::SubTab))
+                .unwrap_or(0);
+            let label = exec(&format!("{};", p.sql))
+                .ok()
+                .and_then(|r| r.into_iter().next())
+                .and_then(|r| r.values().nth(col).cloned())
+                .and_then(|v| v.as_str().map(str::to_string))
+                .unwrap_or_default();
+            let mark = format!("{TAB_MARK}{}{label}", if sub { "s" } else { "t" });
+            queried.push((
+                p,
+                Ok(Vec::new()),
+                false,
+                Some(mark),
+                std::mem::take(&mut slot),
+            ));
+            continue;
+        }
         if roles::is_directive_panel(&p.roles) && !section && !step_marker && !figure {
             continue;
         }
@@ -992,10 +1020,25 @@ fn render_dashboard_html(
         sql::steps::StaticSteps::new(&shown)
     };
     let mut queried = queried.into_iter().peekable();
+    let mut in_tab = false;
     while let Some((p, rows, compact, static_html, slot)) = queried.next() {
         let (pw, ph) = slot.size();
         let span = slot.class();
         if let Some(html) = static_html {
+            // a tab's marker (#1345): opens its section, a sub-tab's a heading
+            if let Some(m) = html.strip_prefix(TAB_MARK) {
+                match m.split_at(1) {
+                    ("t", label) => {
+                        panels.push_str(&page::tab_open(label, in_tab));
+                        in_tab = true;
+                    }
+                    (_, label) => panels.push_str(&format!(
+                        "<h3 class=\"section dp-subtab\">{}</h3>",
+                        escape_xml(label)
+                    )),
+                }
+                continue;
+            }
             panels.push_str(&html);
             n += 1;
             continue;
@@ -1184,9 +1227,20 @@ fn render_dashboard_html(
         n += 1;
     }
 
+    if in_tab {
+        panels.push_str("</section>");
+    }
+    // #1345: the page is named by the dashboard's `-- @title` and
+    // `-- @description` (a `::DASHBOARD_TITLE` / brand still wins).
+    let meta = sv::parse_dashboard_meta("", script);
     let html = page::render(&page::StaticPage {
         theme: &t,
-        fallback_title: "anofox-visualization dashboard",
+        fallback_title: if meta.title.trim().is_empty() {
+            "anofox-visualization dashboard"
+        } else {
+            meta.title.trim()
+        },
+        description: meta.description.as_deref(),
         subtitle_html: format!(
             "rendered from <code>{}</code> · {n} panels",
             escape_xml(path_label)

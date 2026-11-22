@@ -396,6 +396,7 @@ fn no_powered_by_credit_anywhere() {
                 anofox_visualization::page::render(&anofox_visualization::page::StaticPage {
                     theme: set.pick(variant),
                     fallback_title: "x",
+                    description: None,
                     subtitle_html: String::new(),
                     head_extra: String::new(),
                     controls_html: String::new(),
