@@ -157,7 +157,7 @@ pub static REGISTRY: &[RoleSpec] = &[
     e("SANKEY", &["SANKEYCHART"], R::Value(Kind::Sankey), "chart", true,
       "flows between stages: ::ORIGIN → ::DEST, link width by the measure; nodes stack in columns"),
     e("TREEMAP", &["TREE_MAP"], R::Value(Kind::Treemap), "chart", true,
-      "part-to-whole tiles, area by the measure: ::XAXIS names a tile (its key; a ::LABEL then shows a name instead), ::CATEGORY nests tiles in groups"),
+      "part-to-whole tiles, area by the measure: ::XAXIS names a tile (its key; a ::LABEL then shows a name instead), ::CATEGORY nests tiles in groups (::COLORS 'behind:bad; ahead:#1f8a80' pins a group's colour); a numeric ::COLORSCALE / ::COLORSCALE_HIGH_GOOD / ::COLORSCALE_DIVERGING column colours each tile by its value, with a colour bar"),
     e("PARETO_TOTAL", &[], R::ParetoTotal, "modifier", true,
       "the grand total a ::PARETO's cumulative share is of, for a top N of a longer list: the line ends at the top N's share, not 100 %"),
     e("PARETO", &["PARETOCHART"], R::Value(Kind::Pareto), "chart", true,
