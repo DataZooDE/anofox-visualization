@@ -18,6 +18,10 @@ pub struct Locale {
     pub decimal: char,
     /// Thousands separator (may be a narrow no-break space).
     pub group: &'static str,
+    /// Group thousands only from `3 + min_grouping` integer digits (CLDR's
+    /// minimum grouping digits): `1` groups `1.234`, `2` (es-ES, it-IT,
+    /// pl-PL, pt-PT) leaves `1234` and groups from `12.345`.
+    pub min_grouping: u8,
     /// Currency symbol for `::MONEY`.
     pub currency: &'static str,
     /// Its ISO 4217 code (`USD`); a `::CURRENCY_CODE` or a `-u-cu-eur` tag
@@ -46,6 +50,7 @@ impl Locale {
         tag: "en-US",
         decimal: '.',
         group: ",",
+        min_grouping: 1,
         currency: "$",
         currency_code: "USD",
         currency_suffix: false,
@@ -78,6 +83,7 @@ impl Locale {
         tag: "de-DE",
         decimal: ',',
         group: ".",
+        min_grouping: 1,
         currency: "€",
         currency_code: "EUR",
         currency_suffix: true,
@@ -94,6 +100,7 @@ impl Locale {
         tag: "fr-FR",
         decimal: ',',
         group: " ",
+        min_grouping: 1,
         currency: "€",
         currency_code: "EUR",
         currency_suffix: true,
@@ -106,12 +113,158 @@ impl Locale {
         date: "D/M/Y",
     };
 
-    /// Every supported tag.
-    pub const TAGS: &'static [&'static str] = &["en-US", "en-GB", "en-IE", "de-DE", "fr-FR"];
+    /// CLDR presets beyond the hand-written five (#1358): marks, minimum
+    /// grouping, currency placement, compact units, month names and the
+    /// date order as ICU formats them (generated from Node's `Intl`). A
+    /// (narrow) no-break-space group mark is a plain space, as in [`FR_FR`](Self::FR_FR).
+    #[rustfmt::skip]
+    pub const PRESETS: &'static [Locale] = &[
+        Locale {
+            tag: "de-AT", decimal: ',', group: " ", min_grouping: 1,
+            currency: "€", currency_code: "EUR", currency_suffix: false, percent_space: true,
+            compact: ["", "Mio.", "Mrd.", "Bio."],
+            months: ["Jän.", "Feb.", "März", "Apr.", "Mai", "Juni", "Juli", "Aug.", "Sep.", "Okt.", "Nov.", "Dez."],
+            date: "D.M.Y",
+        },
+        Locale {
+            tag: "de-CH", decimal: '.', group: "'", min_grouping: 1,
+            currency: "CHF", currency_code: "CHF", currency_suffix: false, percent_space: false,
+            compact: ["", "Mio.", "Mrd.", "Bio."],
+            months: ["Jan.", "Feb.", "März", "Apr.", "Mai", "Juni", "Juli", "Aug.", "Sept.", "Okt.", "Nov.", "Dez."],
+            date: "D.M.Y",
+        },
+        Locale {
+            tag: "fr-BE", decimal: ',', group: " ", min_grouping: 1,
+            currency: "€", currency_code: "EUR", currency_suffix: true, percent_space: true,
+            compact: ["k", "M", "Md", "Bn"],
+            months: ["janv.", "févr.", "mars", "avr.", "mai", "juin", "juil.", "août", "sept.", "oct.", "nov.", "déc."],
+            date: "D/M/Y",
+        },
+        Locale {
+            tag: "fr-CH", decimal: ',', group: " ", min_grouping: 1,
+            currency: "CHF", currency_code: "CHF", currency_suffix: true, percent_space: false,
+            compact: ["k", "M", "Md", "Bn"],
+            months: ["janv.", "févr.", "mars", "avr.", "mai", "juin", "juil.", "août", "sept.", "oct.", "nov.", "déc."],
+            date: "D.M.Y",
+        },
+        Locale {
+            tag: "fr-CA", decimal: ',', group: " ", min_grouping: 1,
+            currency: "$", currency_code: "CAD", currency_suffix: true, percent_space: true,
+            compact: ["k", "M", "G", "T"],
+            months: ["janv.", "févr.", "mars", "avr.", "mai", "juin", "juill.", "août", "sept.", "oct.", "nov.", "déc."],
+            date: "Y-M-D",
+        },
+        Locale {
+            tag: "it-IT", decimal: ',', group: ".", min_grouping: 2,
+            currency: "€", currency_code: "EUR", currency_suffix: true, percent_space: false,
+            compact: ["K", "Mln", "Mld", "Bln"],
+            months: ["gen", "feb", "mar", "apr", "mag", "giu", "lug", "ago", "set", "ott", "nov", "dic"],
+            date: "D/M/Y",
+        },
+        Locale {
+            tag: "it-CH", decimal: '.', group: "'", min_grouping: 2,
+            currency: "CHF", currency_code: "CHF", currency_suffix: false, percent_space: false,
+            compact: ["K", "Mln", "Mld", "Bln"],
+            months: ["gen", "feb", "mar", "apr", "mag", "giu", "lug", "ago", "set", "ott", "nov", "dic"],
+            date: "D/M/Y",
+        },
+        Locale {
+            tag: "es-ES", decimal: ',', group: ".", min_grouping: 2,
+            currency: "€", currency_code: "EUR", currency_suffix: true, percent_space: true,
+            compact: ["mil", "M", "", "B"],
+            months: ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sept", "oct", "nov", "dic"],
+            date: "D/M/Y",
+        },
+        Locale {
+            tag: "es-MX", decimal: '.', group: ",", min_grouping: 1,
+            currency: "$", currency_code: "MXN", currency_suffix: false, percent_space: false,
+            compact: ["k", "M", "", "B"],
+            months: ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"],
+            date: "D/M/Y",
+        },
+        Locale {
+            tag: "nl-NL", decimal: ',', group: ".", min_grouping: 1,
+            currency: "€", currency_code: "EUR", currency_suffix: false, percent_space: false,
+            compact: ["K", "mln.", "mld.", "bln."],
+            months: ["jan", "feb", "mrt", "apr", "mei", "jun", "jul", "aug", "sep", "okt", "nov", "dec"],
+            date: "D-M-Y",
+        },
+        Locale {
+            tag: "nl-BE", decimal: ',', group: ".", min_grouping: 1,
+            currency: "€", currency_code: "EUR", currency_suffix: false, percent_space: false,
+            compact: ["K", "mln.", "mld.", "bln."],
+            months: ["jan", "feb", "mrt", "apr", "mei", "jun", "jul", "aug", "sep", "okt", "nov", "dec"],
+            date: "D/M/Y",
+        },
+        Locale {
+            tag: "pt-PT", decimal: ',', group: " ", min_grouping: 2,
+            currency: "€", currency_code: "EUR", currency_suffix: true, percent_space: false,
+            compact: ["mil", "M", "mM", "Bi"],
+            months: ["jan.", "fev.", "mar.", "abr.", "mai.", "jun.", "jul.", "ago.", "set.", "out.", "nov.", "dez."],
+            date: "D/M/Y",
+        },
+        Locale {
+            tag: "pt-BR", decimal: ',', group: ".", min_grouping: 1,
+            currency: "R$", currency_code: "BRL", currency_suffix: false, percent_space: false,
+            compact: ["mil", "mi", "bi", "tri"],
+            months: ["jan.", "fev.", "mar.", "abr.", "mai.", "jun.", "jul.", "ago.", "set.", "out.", "nov.", "dez."],
+            date: "D/M/Y",
+        },
+        Locale {
+            tag: "pl-PL", decimal: ',', group: " ", min_grouping: 2,
+            currency: "zł", currency_code: "PLN", currency_suffix: true, percent_space: false,
+            compact: ["tys.", "mln", "mld", "bln"],
+            months: ["sty", "lut", "mar", "kwi", "maj", "cze", "lip", "sie", "wrz", "paź", "lis", "gru"],
+            date: "D.M.Y",
+        },
+        Locale {
+            tag: "sv-SE", decimal: ',', group: " ", min_grouping: 1,
+            currency: "kr", currency_code: "SEK", currency_suffix: true, percent_space: true,
+            compact: ["tn", "mn", "md", "bn"],
+            months: ["jan.", "feb.", "mars", "apr.", "maj", "juni", "juli", "aug.", "sep.", "okt.", "nov.", "dec."],
+            date: "Y-M-D",
+        },
+        Locale {
+            tag: "da-DK", decimal: ',', group: ".", min_grouping: 1,
+            currency: "kr.", currency_code: "DKK", currency_suffix: true, percent_space: true,
+            compact: ["t", "mio.", "mia.", "bio."],
+            months: ["jan.", "feb.", "mar.", "apr.", "maj", "jun.", "jul.", "aug.", "sep.", "okt.", "nov.", "dec."],
+            date: "D.M.Y",
+        },
+        Locale {
+            tag: "nb-NO", decimal: ',', group: " ", min_grouping: 1,
+            currency: "kr", currency_code: "NOK", currency_suffix: true, percent_space: true,
+            compact: ["k", "mill.", "mrd.", "bill."],
+            months: ["jan.", "feb.", "mars", "apr.", "mai", "juni", "juli", "aug.", "sep.", "okt.", "nov.", "des."],
+            date: "D.M.Y",
+        },
+        Locale {
+            tag: "fi-FI", decimal: ',', group: " ", min_grouping: 1,
+            currency: "€", currency_code: "EUR", currency_suffix: true, percent_space: true,
+            compact: ["t.", "milj.", "mrd.", "bilj."],
+            months: ["tammi", "helmi", "maalis", "huhti", "touko", "kesä", "heinä", "elo", "syys", "loka", "marras", "joulu"],
+            date: "D.M.Y",
+        },
+        Locale {
+            tag: "cs-CZ", decimal: ',', group: " ", min_grouping: 1,
+            currency: "Kč", currency_code: "CZK", currency_suffix: true, percent_space: true,
+            compact: ["tis.", "mil.", "mld.", "bil."],
+            months: ["led", "úno", "bře", "dub", "kvě", "čvn", "čvc", "srp", "zář", "říj", "lis", "pro"],
+            date: "D. M. Y",
+        },
+    ];
 
-    /// Look up a BCP-47 tag (case-insensitive; `_` accepted). A language-only
-    /// or other-region tag falls back to its language (`de`, `de-AT` → de-DE,
-    /// `fr-CA` → fr-FR, `en` → en-US). English with a euro-area region
+    /// Every supported tag: the hand-written five, then [`PRESETS`](Self::PRESETS).
+    pub const TAGS: &'static [&'static str] = &[
+        "en-US", "en-GB", "en-IE", "de-DE", "fr-FR", "de-AT", "de-CH", "fr-BE", "fr-CH", "fr-CA",
+        "it-IT", "it-CH", "es-ES", "es-MX", "nl-NL", "nl-BE", "pt-PT", "pt-BR", "pl-PL", "sv-SE",
+        "da-DK", "nb-NO", "fi-FI", "cs-CZ",
+    ];
+
+    /// Look up a BCP-47 tag (case-insensitive; `_` accepted): a preset for
+    /// the exact tag ([`TAGS`](Self::TAGS)), else the language's main locale
+    /// (`de`, `de-LU` → de-DE, `fr-LU` → fr-FR, `it` → it-IT, `pt` → pt-BR,
+    /// `en` → en-US). English with a euro-area region
     /// (`en-DE`, `en-NL`, `en-EU` → en-IE (English with the euro)). `None`
     /// for an unknown language.
     pub fn from_tag(tag: &str) -> Option<Locale> {
@@ -138,7 +291,10 @@ impl Locale {
             "en-ie" => Some(Locale::EN_IE),
             "de-de" => Some(Locale::DE_DE),
             "fr-fr" => Some(Locale::FR_FR),
-            _ => None,
+            _ => Locale::PRESETS
+                .iter()
+                .find(|l| l.tag.eq_ignore_ascii_case(&t))
+                .copied(),
         };
         exact.or_else(|| {
             // English with a euro-area region (or `en-EU`) is English with the euro.
@@ -154,12 +310,24 @@ impl Locale {
                     }
                 }
             }
-            match t.split('-').next().unwrap_or("") {
-                "en" => Some(Locale::EN_US),
-                "de" => Some(Locale::DE_DE),
-                "fr" => Some(Locale::FR_FR),
-                _ => None,
-            }
+            // the language's main locale (CLDR's default region)
+            let main = match t.split('-').next().unwrap_or("") {
+                "en" => return Some(Locale::EN_US),
+                "de" => return Some(Locale::DE_DE),
+                "fr" => return Some(Locale::FR_FR),
+                "it" => "it-IT",
+                "es" => "es-ES",
+                "nl" => "nl-NL",
+                "pt" => "pt-BR",
+                "pl" => "pl-PL",
+                "sv" => "sv-SE",
+                "da" => "da-DK",
+                "nb" | "no" | "nn" => "nb-NO",
+                "fi" => "fi-FI",
+                "cs" => "cs-CZ",
+                _ => return None,
+            };
+            Locale::PRESETS.iter().find(|l| l.tag == main).copied()
         })
     }
 
@@ -234,10 +402,26 @@ impl Locale {
         }
         let mut out = String::with_capacity(en.len() + 4);
         let chars: Vec<char> = en.chars().collect();
+        // the integer digits of the number a grouping comma at `i` sits in
+        let int_digits = |i: usize| {
+            let start = chars[..i]
+                .iter()
+                .rposition(|c| !(c.is_ascii_digit() || *c == ','))
+                .map_or(0, |p| p + 1);
+            chars[start..]
+                .iter()
+                .take_while(|c| c.is_ascii_digit() || **c == ',')
+                .filter(|c| c.is_ascii_digit())
+                .count()
+        };
         for (i, &c) in chars.iter().enumerate() {
             let digit_before = i > 0 && chars[i - 1].is_ascii_digit();
             let digit_after = chars.get(i + 1).is_some_and(|d| d.is_ascii_digit());
             match c {
+                // CLDR minimum grouping: `1234` stays whole under 2
+                ',' if digit_before
+                    && digit_after
+                    && int_digits(i) < 3 + self.min_grouping as usize => {}
                 ',' if digit_before && digit_after => out.push_str(self.group),
                 '.' if digit_after => out.push(self.decimal),
                 c => out.push(c),
@@ -919,5 +1103,32 @@ mod tests {
         assert_eq!(Locale::from_tag("en-GB"), Some(Locale::EN_GB));
         assert_eq!(Locale::EN_IE.gg().currency_symbol, "€");
         assert_eq!(Locale::EN_IE.gg().tag, "en-IE");
+    }
+}
+
+#[cfg(test)]
+mod cldr_1358_tests {
+    use super::*;
+
+    /// #1358: a CLDR preset's axes (ggplot-rs) use the same marks as its
+    /// KPIs and tables, and other tags fall back by language, then en-US.
+    #[test]
+    fn presets_axes_and_fallbacks() {
+        let ch = Locale::from_tag("de-CH").unwrap();
+        assert_eq!(ch.gg().big_mark, ch.group);
+        assert_eq!(ch.gg().decimal_mark, ch.decimal.to_string());
+        assert_eq!(ch.gg().tag, "de-CH");
+        assert_eq!(Locale::from_tag("it").unwrap().tag, "it-IT");
+        assert_eq!(Locale::from_tag("pt").unwrap().tag, "pt-BR");
+        assert_eq!(Locale::from_tag("es-AR").unwrap().tag, "es-ES");
+        assert_eq!(Locale::from_tag("de-LU").unwrap().tag, "de-DE");
+        assert!(Locale::from_tag("xx-YY").is_none());
+        for t in Locale::TAGS {
+            assert_eq!(Locale::from_tag(t).unwrap().tag, *t);
+        }
+        // CLDR minimum grouping: es-ES leaves 4 digits whole
+        let es = Locale::from_tag("es-ES").unwrap();
+        assert_eq!(format_number_l(1234.5, MetricFmt::Plain, &es), "1234,5");
+        assert_eq!(format_number_l(12345.0, MetricFmt::Plain, &es), "12.345");
     }
 }

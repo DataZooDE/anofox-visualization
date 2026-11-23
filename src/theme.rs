@@ -731,15 +731,8 @@ fn build(full: &J, name: &str, variant: Variant) -> Result<ResolvedTheme, String
         .and_then(|v| v.as_f64())
         .filter(|r| (0.0..=40.0).contains(r))
         .ok_or("theme `radius` must be a number 0..40")?;
+    // #1358: a locale without a preset formats as en-US (`--check` warns)
     let locale = text(full, "locale").filter(|s| !s.is_empty());
-    if let Some(l) = &locale {
-        if crate::format::Locale::from_tag(l).is_none() {
-            return Err(format!(
-                "unknown locale `{l}` (known: {})",
-                crate::format::Locale::TAGS.join(", ")
-            ));
-        }
-    }
     Ok(ResolvedTheme {
         name: name.to_string(),
         variant,
@@ -2027,14 +2020,6 @@ impl DashboardChrome {
             (None, Some(set)) => set.clone(),
             _ => resolve(self.theme.as_deref().or(fallback).unwrap_or(""))?,
         };
-        if let Some(l) = &self.locale {
-            if crate::format::Locale::from_tag(l).is_none() {
-                return Err(format!(
-                    "unknown locale `{l}` (known: {})",
-                    crate::format::Locale::TAGS.join(", ")
-                ));
-            }
-        }
         for t in [&mut set.light, &mut set.dark] {
             if let Some(v) = &self.title {
                 t.brand.title = Some(v.clone());
@@ -2210,7 +2195,8 @@ mod tests {
         assert!(resolve(r#"{"brand":{"logo":"javascript:alert(1)"}}"#).is_err());
         assert!(resolve(r#"{"brand":{"logo":"x\" onerror=\"y"}}"#).is_err());
         assert!(resolve("nope").unwrap_err().contains("unknown theme"));
-        assert!(resolve(r#"{"locale":"xx-YY"}"#).is_err());
+        // #1358: a locale without a preset is kept and formats as en-US
+        assert!(resolve(r#"{"locale":"xx-YY"}"#).is_ok());
     }
 
     #[test]
