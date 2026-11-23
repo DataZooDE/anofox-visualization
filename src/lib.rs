@@ -6969,7 +6969,7 @@ fn distinct_labels_of(values: &[Value]) -> usize {
 pub(crate) struct Ramp {
     min: f64,
     max: f64,
-    stops: Vec<(f64, (u8, u8, u8))>,
+    pub(crate) stops: Vec<(f64, (u8, u8, u8))>,
 }
 
 impl Ramp {
