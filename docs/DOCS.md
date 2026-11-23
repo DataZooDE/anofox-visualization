@@ -291,7 +291,7 @@ terminal.
 | `::FOOTER_LINK` | `::FOOTERLINK` | chrome | link at the bottom |
 | `::SECTION` | `::SECTION_HEADING` | layout | a section heading that always starts a new row |
 | `::THEME` |  | chrome | dashboard theme: 'light'/'dark'/'print'/'colorblind'/'high-contrast', a stack 'acme+dark', or JSON |
-| `::LOCALE` |  | chrome | number/date locale for KPIs, tables and axes: 'en-US', 'en-GB', 'en-IE' (English with €), 'de-DE', 'fr-FR' |
+| `::LOCALE` |  | chrome | number/date locale for KPIs, tables and axes: 'en-US', 'en-GB', 'en-IE' (English with €), 'de-DE', 'fr-FR', and CLDR's de-AT, de-CH, fr-BE, fr-CH, fr-CA, it-IT, it-CH, es-ES, es-MX, nl-NL, nl-BE, pt-PT, pt-BR, pl-PL, sv-SE, da-DK, nb-NO, fi-FI, cs-CZ; another region falls back to its language's main locale ('de-LU' → de-DE, 'pt' → pt-BR), an unknown language to en-US (`--check` warns) |
 | `::DASHBOARD_TITLE` | `::DASHBOARDTITLE`, `::PAGE_TITLE` | chrome | dashboard title: page header, browser tab and export title |
 | `::BRAND` | `::BRAND_NAME` | chrome | brand / organisation name shown above the dashboard title |
 | `::LOGO` |  | chrome | header logo image URL (relative, https: or data:image/) |
