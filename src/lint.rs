@@ -1419,10 +1419,10 @@ where
                 Role::Locale if crate::format::Locale::from_tag(&v).is_none() => bad(
                     "locale/unknown",
                     format!(
-                        "unknown locale `{v}` (known: {})",
+                        "unknown locale `{v}`: numbers and dates show as en-US (known: {})",
                         crate::format::Locale::TAGS.join(", ")
                     ),
-                    Severity::Error,
+                    Severity::Warning,
                 ),
                 Role::AsOf => {
                     if crate::freshness::parse_timestamp(&v).is_none() {
