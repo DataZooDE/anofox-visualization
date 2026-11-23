@@ -63,6 +63,7 @@ export default defineConfig({
       sidebar: [
         { label: "Start", items: [
           { label: "What it is", slug: "start/overview" },
+          { label: "Why SQL for AI-made charts", slug: "start/why-sql" },
           { label: "Install", slug: "start/install" },
           { label: "Your first dashboard", slug: "start/first-dashboard" },
         ] },
