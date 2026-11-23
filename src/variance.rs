@@ -744,7 +744,7 @@ pub(crate) fn render_treemap(
                 .iter()
                 .map(|&i| c.values.get(i).and_then(|v| v.as_f64()).unwrap_or(f64::NAN))
                 .collect();
-            v.iter().any(|f| f.is_finite()).then(|| (c, sc, v))
+            v.iter().any(|f| f.is_finite()).then_some((c, sc, v))
         }
         _ => None,
     });
