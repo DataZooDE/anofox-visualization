@@ -1,5 +1,9 @@
 {
   "_doc": "Lint hits scripts/lint-scan.py accepts on shipped dashboards (#1133): per code, the file globs it may fire on and why. A new code firing on a shipped dashboard fails the scan: fix the false positive, fix the dashboard, or add it here with the reason.",
+  "perf/view-expansion": {
+    "why": "A Bayes lesson on a handful of rows: the scenario views stay plain views so the lesson's SQL reads step by step. Planning time not measured yet; a candidate for -- @materialize if the page feels slow (#1362).",
+    "files": ["web/examples/bayes-printer-fix.sql"]
+  },
   "folder/setup-table": {
     "why": "Browser examples and site pages: each page runs in its own DuckDB-Wasm, so the served-memory cost this warns about doesn't apply.",
     "files": ["web/examples/*", "website/showcase/*", "examples/theming/*", "examples/dashboards/*", "dashboards/*"]
