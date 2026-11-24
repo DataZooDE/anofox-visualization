@@ -145,6 +145,8 @@ pub struct Diagnostic {
     /// `question/star-columns` | `question/unknown-tab` | `question/duplicate` | `question/hidden`
     /// (errors); with `--agent` ([`agent_diags`]): `agent/no-questions` |
     /// `agent/no-vars` (errors).
+    /// `perf/view-expansion` ([`view_expansion_diags`], #1362): a panel
+    /// that expands the script's setup views 30 times or more.
     /// `-- @materialize` ([`materialize_diags`], #727): `materialize/not-table`
     /// (warning: not a setup `CREATE TEMP TABLE … AS <query>`).
     /// `-- @tour` guided tours ([`tour_diags`], #518 PR B): `tour/bad-id` |
@@ -340,6 +342,100 @@ fn finalize_pending_gate(
 
 /// Like [`check`], but with [`LintOptions`] (e.g. to disable the `design/*`
 /// advisory pass, or set [`LintOptions::stateful_session`]).
+/// #1362: `perf/view-expansion` warns at this many view expansions.
+const VIEW_EXPANSIONS_WARN: usize = 30;
+
+/// #1362: how many times each panel's query expands the script's setup
+/// views. DuckDB inlines a view at every reference, so a view read three
+/// times by a view read three times by the panel is planned nine times;
+/// the plan grows with the product along the chain and planning starts to
+/// dominate. Counts `Word` tokens naming a `CREATE … VIEW` of the script.
+fn view_expansion_diags(plan: &[sql::Panel]) -> Vec<Diagnostic> {
+    use crate::sql::lex::{tokenize, TokKind};
+    let mut views: Vec<(String, String)> = Vec::new(); // (name, body)
+    for p in plan.iter().filter(|p| p.setup) {
+        let toks: Vec<_> = tokenize(&p.sql)
+            .into_iter()
+            .filter(|t| !t.is_trivia())
+            .collect();
+        let w = |i: usize| {
+            toks.get(i)
+                .map(|t| t.text(&p.sql).to_ascii_lowercase())
+                .unwrap_or_default()
+        };
+        if w(0) != "create" {
+            continue;
+        }
+        let mut i = 1;
+        while ["or", "replace", "temp", "temporary"].contains(&w(i).as_str()) {
+            i += 1;
+        }
+        if w(i) == "view" && toks.get(i + 1).is_some_and(|t| t.kind == TokKind::Word) {
+            let name = w(i + 1).trim_matches('"').to_string();
+            views.push((name, p.sql.clone()));
+        }
+    }
+    if views.is_empty() {
+        return Vec::new();
+    }
+    let refs = |sql: &str, skip: Option<&str>| -> Vec<(usize, usize)> {
+        let toks = tokenize(sql);
+        views
+            .iter()
+            .enumerate()
+            .filter(|(_, (n, _))| Some(n.as_str()) != skip)
+            .map(|(k, (n, _))| {
+                let c = toks
+                    .iter()
+                    .filter(|t| {
+                        t.kind == TokKind::Word
+                            && t.text(sql).trim_matches('"').eq_ignore_ascii_case(n)
+                    })
+                    .count();
+                (k, c)
+            })
+            .filter(|(_, c)| *c > 0)
+            .collect()
+    };
+    // a view's expansions: its own body's references, each with theirs
+    // (in script order, so a view only reads earlier ones)
+    let mut own: Vec<usize> = vec![0; views.len()];
+    for k in 0..views.len() {
+        let (n, body) = &views[k];
+        own[k] = refs(body, Some(n))
+            .into_iter()
+            .filter(|(j, _)| *j < k)
+            .map(|(j, c)| c * (1 + own[j]))
+            .sum();
+    }
+    let mut out = Vec::new();
+    for (stmt, p) in plan.iter().enumerate() {
+        if p.setup {
+            continue;
+        }
+        let r = refs(&p.sql, None);
+        let total: usize = r.iter().map(|(j, c)| c * (1 + own[*j])).sum();
+        if total >= VIEW_EXPANSIONS_WARN {
+            let mut chain: Vec<&str> = r.iter().map(|(j, _)| views[*j].0.as_str()).collect();
+            chain.sort();
+            out.push(Diagnostic {
+                severity: Severity::Warning,
+                stmt,
+                code: "perf/view-expansion",
+                message: format!(
+                    "this panel expands the setup views {} {total} times: DuckDB inlines a view at \
+                     every reference, so planning takes most of the time — make a view read \
+                     several times a table (`-- @materialize` above `CREATE TEMP TABLE … AS`) \
+                     or use `WITH x AS MATERIALIZED (…)` inside it",
+                    chain.join(", ")
+                ),
+                sql: p.sql.chars().take(80).collect(),
+            });
+        }
+    }
+    out
+}
+
 pub fn check_opts<F>(script: &str, mut run_query: F, opts: LintOptions) -> Vec<Diagnostic>
 where
     F: FnMut(&str) -> Result<Vec<Map<String, Value>>, String>,
@@ -2844,6 +2940,7 @@ where
     diags.extend(name_diags(&plan));
     diags.extend(question_diags(script, &plan));
     diags.extend(materialize_diags(&plan));
+    diags.extend(view_expansion_diags(&plan));
     diags.extend(tour_diags(script, &plan));
     diags.extend(step_diags(&plan, script));
     diags.extend(figure_diags(&plan, &figure_cols));
@@ -14621,5 +14718,28 @@ mod smooth_method_tests {
         assert!(!motion_diags(&with_trend, &rows)
             .iter()
             .any(|(c, _)| *c == "smooth/no-trend"));
+    }
+}
+
+#[cfg(test)]
+mod view_expansion_1362_tests {
+    use super::*;
+
+    const CHAIN: &str = "CREATE TABLE t AS SELECT range AS i, range % 10 AS g FROM range(100);\n\
+        CREATE OR REPLACE TEMP VIEW a AS SELECT g, count(*) AS n FROM t GROUP BY g;\n\
+        CREATE OR REPLACE TEMP VIEW b AS SELECT * FROM a WHERE n > (SELECT avg(n) FROM a);\n\
+        CREATE OR REPLACE TEMP VIEW c AS SELECT * FROM b WHERE g IN (SELECT g FROM b) AND n = (SELECT max(n) FROM b);\n";
+
+    /// #1362: c → b → a read 3 × 3 × 2 times by a panel reading c 3 times
+    /// is 30 expansions (a warning); one read of a plain view is not.
+    #[test]
+    fn a_chain_of_views_read_several_times_warns() {
+        let warn = format!("{CHAIN}SELECT (SELECT count(*) FROM c) AS k, (SELECT sum(n) FROM c) AS s, (SELECT min(g) FROM c) AS m ::TABLE;\n");
+        let d = view_expansion_diags(&sql::plan(&warn));
+        assert_eq!(d.len(), 1, "{d:?}");
+        assert_eq!(d[0].code, "perf/view-expansion");
+        assert!(d[0].message.contains(" c 30 times"), "{}", d[0].message);
+        let quiet = format!("{CHAIN}SELECT count(*) AS k ::METRIC FROM a;\nSELECT 'c' AS label, 'a' AS g ::TABLE;\n");
+        assert!(view_expansion_diags(&sql::plan(&quiet)).is_empty());
     }
 }
