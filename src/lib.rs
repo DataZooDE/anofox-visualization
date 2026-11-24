@@ -1376,12 +1376,8 @@ impl RenderOptions {
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
         {
-            self.locale = format::Locale::from_tag(l).ok_or_else(|| {
-                format!(
-                    "unknown locale `{l}` (known: {})",
-                    format::Locale::TAGS.join(", ")
-                )
-            })?;
+            // #1358: a locale without a preset formats as en-US (`--check` warns)
+            self.locale = format::Locale::from_tag(l).unwrap_or_default();
         }
         if let Some(p) = ctx
             .get("primary")
@@ -6969,7 +6965,7 @@ fn distinct_labels_of(values: &[Value]) -> usize {
 pub(crate) struct Ramp {
     min: f64,
     max: f64,
-    stops: Vec<(f64, (u8, u8, u8))>,
+    pub(crate) stops: Vec<(f64, (u8, u8, u8))>,
 }
 
 impl Ramp {

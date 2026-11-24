@@ -10,7 +10,7 @@ default-members = ["."]
 resolver = "2"
 
 [workspace.package]
-version = "2026.11.25"
+version = "2026.11.26"
 edition = "2021"
 license = "BUSL-1.1"
 
@@ -199,7 +199,7 @@ crate-type = ["cdylib", "rlib"]
 # unmapped column named like an aesthetic changes nothing; factor-graph shapes
 # and the banded layout (#1151).
 # For local ggplot-rs work, `[patch.crates-io]` it to a path.
-ggplot-rs = { version = "0.65.2", default-features = false, features = ["sf", "tiles"] }
+ggplot-rs = { version = "0.66.0", default-features = false, features = ["sf", "tiles"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 # The drawing-only SVG check (src/svg_safe.rs): `--site`'s assets and runtime
 # plugins' panels, natively and in the browser build (#1213).

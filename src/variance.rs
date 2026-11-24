@@ -735,17 +735,67 @@ pub(crate) fn render_treemap(
         }));
         aes = aes.key("k");
     }
+    // #1359: a numeric ::COLORSCALE / _HIGH_GOOD / _DIVERGING column colours
+    // each tile by its value (size = one measure, colour = another), with a
+    // colour bar — the same status ramp a heatmap or table cell uses.
+    let measure = cols.iter().find_map(|c| match c.role {
+        Role::ColorScale(sc) => {
+            let v: Vec<f64> = keep
+                .iter()
+                .map(|&i| c.values.get(i).and_then(|v| v.as_f64()).unwrap_or(f64::NAN))
+                .collect();
+            v.iter().any(|f| f.is_finite()).then_some((c, sc, v))
+        }
+        _ => None,
+    });
     let mut fills: Vec<(String, ggplot_rs::scale::color::RGBAColor)> = Vec::new();
     if let Some(g) = &groups {
         let col: Vec<String> = keep.iter().map(|&i| g[i].clone()).collect();
-        // the theme's series colours, by group in first-seen order
+        // #1359: a ::COLORS level map ('behind:#d0456f; ahead:good') pins
+        // a group's colour; the rest take the theme's series colours in
+        // first-seen order
+        let pinned = cols
+            .iter()
+            .find(|c| c.role == Role::GaugeColors)
+            .and_then(|c| c.values.first())
+            .map(value_str)
+            .filter(|s| crate::thresholds::is_level_map(s))
+            .and_then(|s| crate::thresholds::parse_level_colors(&s).ok())
+            .unwrap_or_default();
+        let mut next = 0;
         for v in &col {
-            if !fills.iter().any(|(k, _)| k == v) {
-                fills.push((v.clone(), crate::dz_color(o, fills.len())));
+            if fills.iter().any(|(k, _)| k == v) {
+                continue;
             }
+            let c = match pinned.iter().find(|(l, _)| l == v) {
+                Some((_, c)) => {
+                    let (r, g, b) = c.rgb(&o.theme);
+                    ggplot_rs::scale::color::RGBAColor::new(r, g, b)
+                }
+                None => {
+                    next += 1;
+                    crate::dz_color(o, next - 1)
+                }
+            };
+            fills.push((v.clone(), c));
         }
         data.push(("g".to_string(), strs(col)));
-        aes = aes.subgroup("g").fill("g");
+        aes = aes.subgroup("g");
+        if measure.is_none() {
+            aes = aes.fill("g");
+        }
+    }
+    // the measure's column, under its own name (the colour bar's title)
+    let measure_col = measure.as_ref().map(|(c, ..)| {
+        if ["x", "w", "k", "g"].contains(&c.name.as_str()) {
+            format!("{} ", c.name)
+        } else {
+            c.name.clone()
+        }
+    });
+    if let (Some((_, _, v)), Some(name)) = (&measure, &measure_col) {
+        data.push((name.clone(), nums(v.iter().copied())));
+        aes = aes.fill(name);
     }
     let c0 = o.theme.color(0);
     let mut plot = GGPlot::new(data)
@@ -757,8 +807,24 @@ pub(crate) fn render_treemap(
             ..Default::default()
         })
         .theme(chart_theme(o, 11.0))
-        .legend_position(LegendPosition::None);
-    if !fills.is_empty() {
+        .legend_position(if measure.is_some() {
+            LegendPosition::Right
+        } else {
+            LegendPosition::None
+        });
+    if let Some((_, sc, v)) = &measure {
+        let finite = v.iter().copied().filter(|f| f.is_finite());
+        let (min, max) = finite.fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), f| {
+            (a.min(f), b.max(f))
+        });
+        let ramp = crate::Ramp::status(o, *sc, min, max);
+        plot = plot.scale_fill_gradientn(
+            ramp.stops
+                .iter()
+                .map(|&(p, (r, g, b))| (p, ggplot_rs::scale::color::RGBAColor::new(r, g, b)))
+                .collect(),
+        );
+    } else if !fills.is_empty() {
         plot = plot.scale_fill_manual(fills.iter().map(|(k, c)| (k.as_str(), *c)).collect());
     }
     if let Some(t) = title {

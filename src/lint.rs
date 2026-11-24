@@ -1419,10 +1419,10 @@ where
                 Role::Locale if crate::format::Locale::from_tag(&v).is_none() => bad(
                     "locale/unknown",
                     format!(
-                        "unknown locale `{v}` (known: {})",
+                        "unknown locale `{v}`: numbers and dates show as en-US (known: {})",
                         crate::format::Locale::TAGS.join(", ")
                     ),
-                    Severity::Error,
+                    Severity::Warning,
                 ),
                 Role::AsOf => {
                     if crate::freshness::parse_timestamp(&v).is_none() {
@@ -8660,9 +8660,13 @@ fn tile_scale_diags(
         .iter()
         .find(|(_, r)| matches!(r, Role::Value(Kind::Heatmap | Kind::Calendar)));
     let scale = roles.iter().find(|(_, r)| matches!(r, Role::ColorScale(_)));
-    let table = roles
-        .iter()
-        .any(|(_, r)| matches!(r, Role::Table | Role::PagedTable));
+    // a ::TREEMAP colours its tiles by the ::COLORSCALE… column (#1359)
+    let table = roles.iter().any(|(_, r)| {
+        matches!(
+            r,
+            Role::Table | Role::PagedTable | Role::Value(Kind::Treemap)
+        )
+    });
     let rules = roles
         .iter()
         .find(|(_, r)| *r == Role::Thresholds)
@@ -8672,8 +8676,8 @@ fn tile_scale_diags(
         (Some((_, r)), None) if !table => warn(
             "colorscale/no-tiles",
             format!(
-                "::{} colours a table column's cells or a ::HEATMAP / ::CALENDAR's tiles — \
-                 this panel has neither, so it does nothing",
+                "::{} colours a table column's cells, a ::HEATMAP / ::CALENDAR's tiles or a \
+                 ::TREEMAP's tiles — this panel has none of them, so it does nothing",
                 r.token()
             ),
         ),

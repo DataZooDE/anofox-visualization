@@ -10915,23 +10915,27 @@ async function runOnce(fresh = true, pv = preview) {
   // run — a later setup statement that reads one runs again even when its
   // own variables did not change (cc_plan → cc_erlang → cc_day).
   const rebuilt = new Set();
+  // One chrome directive's value into the page's theme / chrome.
+  const evalChrome = async (s, i) => {
+    const cr = chromeRole(s);
+    const rows = JSON.parse(await runSql(s.sql, undefined, undefined, undefined, i));
+    const idx = s.roles.find((r) => r[1] === cr)[0];
+    let v = rows[0] ? rows[0]["c" + idx] ?? Object.values(rows[0])[0] : null;
+    if (v != null && typeof v === "object") v = JSON.stringify(v);
+    v = v == null ? "" : String(v);
+    if (cr === "THEME") dpTheme.spec = v;
+    else if (cr === "ASOF") {
+      // ::ASOF: the data's timestamp (+ an optional 'stale=24h' cell)
+      const opt = Object.values(rows[0] || {}).find((c) => typeof c === "string" && /^\s*stale/.test(c));
+      const raw = rows[0] ? rows[0]["c" + idx] ?? Object.values(rows[0])[0] : null;
+      dpAsof = { at: asofParse(raw), day: asofDay(raw), stale: asofStale(opt) };
+    } else dpTheme.chrome[CHROME_KEY[cr]] = v;
+  };
   for (let i = 0; i < stmts.length; i++) {
     const s = stmts[i];
     try {
       if (!s.setup && chromeRole(s)) {
-        const cr = chromeRole(s);
-        const rows = JSON.parse(await runSql(s.sql, undefined, undefined, undefined, i));
-        const idx = s.roles.find((r) => r[1] === cr)[0];
-        let v = rows[0] ? rows[0]["c" + idx] ?? Object.values(rows[0])[0] : null;
-        if (v != null && typeof v === "object") v = JSON.stringify(v);
-        v = v == null ? "" : String(v);
-        if (cr === "THEME") dpTheme.spec = v;
-        else if (cr === "ASOF") {
-          // ::ASOF: the data's timestamp (+ an optional 'stale=24h' cell)
-          const opt = Object.values(rows[0] || {}).find((c) => typeof c === "string" && /^\s*stale/.test(c));
-          const raw = rows[0] ? rows[0]["c" + idx] ?? Object.values(rows[0])[0] : null;
-          dpAsof = { at: asofParse(raw), day: asofDay(raw), stale: asofStale(opt) };
-        } else dpTheme.chrome[CHROME_KEY[cr]] = v;
+        await evalChrome(s, i);
         continue;
       }
       if (s.setup) {
@@ -11127,6 +11131,17 @@ async function runOnce(fresh = true, pv = preview) {
       dpViewerVars.add(SETVAR_RE.exec(sqlCode(s.sql))[1].toLowerCase());
     } catch (e) {
       if (!isOptionalMissing(s, e)) console.error(e);
+    }
+  }
+  // #1357: a chrome directive that reads a variable (`coalesce(getvariable
+  // ('locale'), 'de-DE')::LOCALE`) runs again now that the viewer's values
+  // are final — a URL / setVars seed no input claimed is only applied above,
+  // after the pre-pass, and an input may sit after the directive.
+  for (const i of chromeReadingVars(stmts)) {
+    try {
+      await evalChrome(stmts[i], i);
+    } catch (e) {
+      console.error(e);
     }
   }
   markPending(grid, stmts, fresh); // now the changed variables are known
@@ -18815,6 +18830,16 @@ function assetUrl(p) {
 // count), else one is added at the end of the "-- ── Look" section (or after
 // the leading comments). An empty value removes the statement.
 // The first statement of `sql` casting to `roleName` (a RegExp match), or null.
+// #1357: the statement indexes of chrome directives (::LOCALE, ::THEME, …)
+// whose SQL reads a variable — they are evaluated again once the viewer's
+// values are final.
+function chromeReadingVars(stmts) {
+  const out = [];
+  stmts.forEach((s, i) => {
+    if (!s.setup && chromeRole(s) && /\bgetvariable\s*\(/i.test(sqlCode(s.sql))) out.push(i);
+  });
+  return out;
+}
 function chromeStmt(sql, roleName) {
   // (?!'): a literal ends only where no quote follows, so `'a''b'` matches
   // one way — as two adjacent literals it made the repetition below

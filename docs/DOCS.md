@@ -100,7 +100,7 @@ terminal.
 | `::BULLET` | `::BULLETCHART` | chart | measure per XAXIS row vs a ::GOAL tick over ::RANGE bands '60,80,100' |
 | `::FUNNEL` | `::FUNNELCHART` | chart | ordered XAXIS stages, widths by value, conversion % from the previous stage |
 | `::SANKEY` | `::SANKEYCHART` | chart | flows between stages: ::ORIGIN → ::DEST, link width by the measure; nodes stack in columns |
-| `::TREEMAP` | `::TREE_MAP` | chart | part-to-whole tiles, area by the measure: ::XAXIS names a tile (its key; a ::LABEL then shows a name instead), ::CATEGORY nests tiles in groups |
+| `::TREEMAP` | `::TREE_MAP` | chart | part-to-whole tiles, area by the measure: ::XAXIS names a tile (its key; a ::LABEL then shows a name instead), ::CATEGORY nests tiles in groups (::COLORS 'behind:bad; ahead:#1f8a80' pins a group's colour); a numeric ::COLORSCALE / ::COLORSCALE_HIGH_GOOD / ::COLORSCALE_DIVERGING column colours each tile by its value, with a colour bar |
 | `::PARETO_TOTAL` |  | modifier | the grand total a ::PARETO's cumulative share is of, for a top N of a longer list: the line ends at the top N's share, not 100 % |
 | `::PARETO` | `::PARETOCHART` | chart | XAXIS categories as bars sorted largest first, with the cumulative share as a line on a 0–100 % right axis |
 | `::GANTT` | `::GANTTCHART`, `::TIMELINE_BARS` | chart | one bar per task (this column names it) from ::XMIN to ::XMAX (dates or numbers); ::CATEGORY colours the bars |
@@ -291,7 +291,7 @@ terminal.
 | `::FOOTER_LINK` | `::FOOTERLINK` | chrome | link at the bottom |
 | `::SECTION` | `::SECTION_HEADING` | layout | a section heading that always starts a new row |
 | `::THEME` |  | chrome | dashboard theme: 'light'/'dark'/'print'/'colorblind'/'high-contrast', a stack 'acme+dark', or JSON |
-| `::LOCALE` |  | chrome | number/date locale for KPIs, tables and axes: 'en-US', 'en-GB', 'en-IE' (English with €), 'de-DE', 'fr-FR' |
+| `::LOCALE` |  | chrome | number/date locale for KPIs, tables and axes: 'en-US', 'en-GB', 'en-IE' (English with €), 'de-DE', 'fr-FR', and CLDR's de-AT, de-CH, fr-BE, fr-CH, fr-CA, it-IT, it-CH, es-ES, es-MX, nl-NL, nl-BE, pt-PT, pt-BR, pl-PL, sv-SE, da-DK, nb-NO, fi-FI, cs-CZ; another region falls back to its language's main locale ('de-LU' → de-DE, 'pt' → pt-BR), an unknown language to en-US (`--check` warns) |
 | `::DASHBOARD_TITLE` | `::DASHBOARDTITLE`, `::PAGE_TITLE` | chrome | dashboard title: page header, browser tab and export title |
 | `::BRAND` | `::BRAND_NAME` | chrome | brand / organisation name shown above the dashboard title |
 | `::LOGO` |  | chrome | header logo image URL (relative, https: or data:image/) |
