@@ -656,23 +656,24 @@ body.dark .dp-img-row.has-dark .dp-img-missing{display:none}
 .subtabbar{grid-column:1/-1;display:flex;flex-wrap:wrap;gap:.3rem;margin:0 0 1rem;padding:.25rem;background:var(--ax-subtab-bg);border-radius:10px}
 /* -- @layout story (#1367): one scrolling article. Tabs are sections one
    after another under numbered headings; the tab bar is their contents,
-   sticky, marking the section in view; prose keeps a reading width, charts
+   sticky (the page scrolls, not .dash: its overflow stays visible), marking
+   the section in view; prose keeps a reading width, charts
    and tables the column's. The opening (.story-hero) comes from the header:
    -- @group as kicker, -- @title as headline, -- @description as summary. */
-.dash.dp-story{width:100%;max-width:1040px;margin-inline:auto;flex-direction:column;align-items:stretch;counter-reset:story-sec}
+.dash.dp-story{width:100%;max-width:1040px;margin-inline:auto;flex-direction:column;align-items:stretch;counter-reset:story-sec;overflow:visible}
 .dp-story>.grid:empty{display:none}
 .story-hero{padding:2.2rem 0 1.4rem;margin-bottom:.4rem;border-bottom:1px solid var(--ax-line)}
 .story-kicker{margin:0 0 .7rem;font-family:var(--ax-font-display);font-size:.78rem;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--ax-tab-active)}
 .story-title{margin:0;max-width:22ch;font-family:var(--ax-font-display);font-size:clamp(1.9rem,4.2vw,2.9rem);line-height:1.08;letter-spacing:-.025em;font-weight:700;color:var(--ax-ink)}
 .story-dek{margin:.9rem 0 0;max-width:58ch;font-size:1.2rem;line-height:1.5;color:var(--ax-muted)}
 .story-meta{margin:1.1rem 0 0;font-size:.8rem;letter-spacing:.02em;color:var(--ax-muted)}
-.dp-story>.tabbar{position:sticky;top:0;z-index:6;margin:0 0 .6rem;padding:.45rem 0;border-bottom:1px solid var(--ax-line);background:var(--ax-canvas);counter-reset:story-toc;gap:.1rem}
+.dp-story>.tabbar{position:sticky;top:var(--story-top,0px);z-index:6;margin:0 0 .6rem;padding:.45rem 0;border-bottom:1px solid var(--ax-line);background:var(--ax-canvas);counter-reset:story-toc;gap:.1rem}
 .dp-story>.tabbar .tab-btn{counter-increment:story-toc;padding:.3rem .65rem;border-radius:999px;font-size:.82rem;font-weight:600;color:var(--ax-tab-ink)}
 .dp-story>.tabbar .tab-btn::before{content:counter(story-toc);margin-right:.4rem;font-variant-numeric:tabular-nums;color:var(--ax-muted);font-weight:500}
 .dp-story>.tabbar .tab-btn.active{color:var(--ax-tab-active);background:var(--ax-tab-hover-bg)}
 .dp-story>.tabbar .tab-btn.active::after{display:none}
 .dp-story .subtabbar{display:none}
-.dp-story .tabpane{scroll-margin-top:3.4rem}
+.dp-story .tabpane{scroll-margin-top:calc(var(--story-top,0px) + 3.4rem)}
 .dp-story .tabpane+.tabpane{margin-top:3.2rem}
 .dp-story .story-h{grid-column:1/-1;margin:1.2rem 0 -.5rem;font-family:var(--ax-font-display);color:var(--ax-ink)}
 .dp-story h2.story-h{counter-increment:story-sec;font-size:1.7rem;line-height:1.15;letter-spacing:-.02em}
@@ -685,6 +686,17 @@ body.dark .dp-img-row.has-dark .dp-img-missing{display:none}
 .dp-story .md-plain .md-body blockquote{margin:1.4rem 0;padding:.2rem 0 .2rem 1.1rem;border-left:3px solid var(--ax-accent-bar);font-family:var(--ax-font-display);font-size:1.25rem;line-height:1.45;color:var(--ax-ink)}
 .dp-story .md-plain .md-body blockquote p{margin:0}
 .dp-story .md-plain .md-body li{margin:.35rem 0}
+/* Wide screens: the contents move into a column on the right that stays in
+   view while the article scrolls, the section in view marked by a bar. */
+@media (min-width:1300px){
+.dash.dp-story{display:grid;grid-template-columns:minmax(0,1fr) 13.5rem;column-gap:3rem;max-width:1340px;align-content:start}
+.dp-story>.preview-bar,.dp-story>.story-hero,.dp-story>.grid,.dp-story>.tabwrap{grid-column:1}
+.dp-story>.tabbar{grid-column:2;grid-row:1/span 5;align-self:start;position:sticky;top:calc(var(--story-top,0px) + 1.4rem);margin:2.4rem 0 0;padding:0;flex-direction:column;flex-wrap:nowrap;gap:0;border:0;border-left:1px solid var(--ax-line);background:transparent}
+.dp-story>.tabbar::before{content:"Contents";margin:0 0 .5rem;padding-left:.95rem;font-family:var(--ax-font-display);font-size:.72rem;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--ax-muted)}
+.dp-story>.tabbar .tab-btn{margin-left:-1px;padding:.42rem .9rem;border-radius:0;border-left:2px solid transparent;text-align:left;white-space:normal;line-height:1.35;font-size:.86rem;background:none}
+.dp-story>.tabbar .tab-btn:hover{background:none;color:var(--ax-ink)}
+.dp-story>.tabbar .tab-btn.active{border-left-color:var(--ax-accent-bar);background:none;color:var(--ax-tab-active)}
+}
 .subtab-btn{border-radius:8px;border-bottom:0;padding:.4rem .85rem;font-size:.83rem}
 .subtab-btn:hover{background:var(--ax-pill-hover)}
 .subtab-btn.active{color:var(--ax-accent-ink);background:var(--ax-btn-bg);border-bottom:0}
