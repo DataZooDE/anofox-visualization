@@ -89,7 +89,8 @@ pub struct Diagnostic {
     /// `plain`/`card`/`callout`, so `-- @markdown_style` is ignored —
     /// `::MARKDOWN` panels without their own `::MARKDOWN_STYLE` fall back to
     /// 'callout') | `header/bad-inputs` (not `auto`/`manual`, #950) |
-    /// `header/bad-layout` (not `story`/`grid`, #1367). A served folder
+    /// `header/bad-layout` (not `story`/`grid`, #1367) | `header/bad-term`
+    /// (`-- @term` without `<term>: <definition>`, #1381). A served folder
     /// ([`folder_diags`], warnings): `folder/duplicate-title` (two
     /// dashboards that would show the same label in the nav / `/` list —
     /// their `-- @nav`, or `-- @title` without one) | `folder/bad-id` |
@@ -3854,6 +3855,7 @@ fn other_header_line(l: &str) -> bool {
         "tags",
         "inputs",
         "layout",
+        "term",
     ]
     .iter()
     .any(|k| header_value(l, k).is_some())
@@ -5459,6 +5461,18 @@ pub fn header_diags(script: &str) -> Vec<Diagnostic> {
                          'callout'"
                     )
                 },
+                line,
+            );
+        } else if let Some(v) = header_value(line, "term").filter(|v| {
+            v.split_once(':')
+                .is_none_or(|(t, d)| t.trim().is_empty() || d.trim().is_empty())
+        }) {
+            warn(
+                "header/bad-term",
+                format!(
+                    "`-- @term {v}` needs `<term>: <definition>` — e.g. `-- @term censored: still \
+                     on its way` — the line is ignored"
+                ),
                 line,
             );
         } else if let Some(v) = header_value(line, "layout")
@@ -9774,6 +9788,8 @@ mod design_tests {
         assert!(codes("-- @layout story\nSELECT 1;").is_empty());
         assert!(codes("-- @layout grid\nSELECT 1;").is_empty());
         assert_eq!(codes("-- @layout essay\n"), ["header/bad-layout"]);
+        assert!(codes("-- @term censored: still on its way\nSELECT 1;").is_empty());
+        assert_eq!(codes("-- @term censored\n"), ["header/bad-term"]);
         assert!(codes("-- @markdown_style plain\nSELECT 1;").is_empty());
         assert!(codes("-- @markdown_style card\nSELECT 1;").is_empty());
         assert!(codes("-- @markdown_style callout\nSELECT 1;").is_empty());

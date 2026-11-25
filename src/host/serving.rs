@@ -1284,6 +1284,11 @@ pub struct DashboardMeta {
     /// says otherwise. `None` for the usual grid (`grid`, or an unrecognized
     /// value: lint warns, `header/bad-layout`).
     pub layout: Option<String>,
+    /// `-- @term <word or phrase>: <definition>` lines (#1381): a story's
+    /// glossary — the first use of each term in a part is underlined and
+    /// explains itself on hover, focus or tap. In file order; a line without
+    /// `:` or with an empty side is skipped (lint warns: `header/bad-term`).
+    pub terms: Vec<(String, String)>,
     /// `-- @tour <id> [title]` blocks (#518 PR B), in file order. See
     /// [`parse_dashboard_meta`] for the syntax and [`Tour`] for the fields.
     pub tours: Vec<Tour>,
@@ -1595,6 +1600,13 @@ pub fn parse_dashboard_meta(id: &str, script: &str) -> DashboardMeta {
             // an unrecognized value leaves it unset — every reader then
             // falls back to 'callout' (lint warns: header/bad-markdown-style)
             m.markdown_style = crate::roles::markdown_style_of(r).map(str::to_string);
+        } else if let Some(r) = header_value(l, "term") {
+            if let Some((t, d)) = r.split_once(':') {
+                let (t, d) = (t.trim(), d.trim());
+                if !t.is_empty() && !d.is_empty() && m.terms.len() < 64 {
+                    m.terms.push((t.to_string(), d.to_string()));
+                }
+            }
         } else if let Some(r) = header_value(l, "layout") {
             // `grid` (the default) and anything unrecognized: no layout
             m.layout = (r.eq_ignore_ascii_case("story")).then(|| "story".to_string());
@@ -2865,6 +2877,18 @@ mod tests {
         assert_eq!(
             parse_dashboard_meta("s", "-- @layout essay\nSELECT 1;").layout,
             None
+        );
+        // #1381: a story's glossary
+        let g = parse_dashboard_meta(
+            "s",
+            "-- @term censored: still on its way\n-- @term Weibull model:a curve for delays\n-- @term nothing here\n-- @term : no term\nSELECT 1;",
+        );
+        assert_eq!(
+            g.terms,
+            vec![
+                ("censored".into(), "still on its way".into()),
+                ("Weibull model".into(), "a curve for delays".into())
+            ]
         );
         assert_eq!(parse_dashboard_meta("s", "SELECT 1;").markdown_style, None);
         assert_eq!(

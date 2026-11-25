@@ -12997,6 +12997,7 @@ async function runOnce(fresh = true, pv = preview) {
   dash._shape = shape;
   dash.classList.toggle("dp-story", dpStory);
   storyChrome(dash, dpStory, pv ? pv.sql : $("sql").value);
+  if (dpStory) requestAnimationFrame(() => storyStartAt(dash));
   for (const img of candidateBlobImgs) if (!img.isConnected) URL.revokeObjectURL(img.dataset.anofoxBlob);
   // #554 review (N2): mark this run's own sweep as having happened, so a
   // same-run fetch that resolves *after* this point (too slow to make
@@ -15994,8 +15995,15 @@ function storyOn(sql) {
 // time, and the contents entry of the section in view marked as current.
 function storyChrome(dash, on, sql) {
   dash.querySelector(":scope > .story-hero")?.remove();
+  dash.querySelector(":scope > .story-progress")?.remove();
   dash._storySpy?.disconnect();
   dash._storySpy = null;
+  dash._storyMo?.disconnect();
+  dash._storyMo = null;
+  (dash._storyIos || []).forEach((io) => io.disconnect());
+  dash._storyIos = [];
+  if (dash._storyScroll) removeEventListener("scroll", dash._storyScroll);
+  dash._storyScroll = null;
   if (!on) return;
   let meta = {};
   try {
@@ -16028,17 +16036,316 @@ function storyChrome(dash, on, sql) {
   dash.style.setProperty("--story-top", `${fixed ? Math.round(bar.getBoundingClientRect().height) : 0}px`);
   const btns = [...dash.querySelectorAll(":scope > .tabbar > .tab-btn")];
   const panes = [...dash.querySelectorAll(":scope > .tabwrap > .tabpane")];
+  // #1376: every part has an id (`#part-3` in the text jumps there) and a
+  // link on its heading that copies the page's address with ?tab=<part>
+  panes.forEach((pane, i) => {
+    pane.id = `part-${i + 1}`;
+    const h = pane.querySelector(":scope > h2.story-h");
+    if (!h || h.querySelector(".story-anchor") || !btns[i]) return;
+    const a = document.createElement("a");
+    a.className = "story-anchor";
+    a.href = `#part-${i + 1}`;
+    a.title = "Copy a link to this part";
+    a.setAttribute("aria-label", `Copy a link to “${btns[i].textContent}”`);
+    a.onclick = (e) => {
+      e.preventDefault();
+      const u = new URL(location.href);
+      u.hash = "";
+      u.searchParams.set("tab", btns[i].textContent);
+      navigator.clipboard?.writeText(u.href).then(
+        () => {
+          a.dataset.copied = "Link copied";
+          setTimeout(() => delete a.dataset.copied, 1600);
+        },
+        () => {},
+      );
+    };
+    h.appendChild(a);
+  });
+  // #1380: under every chart and table, its SQL as written, folded, and
+  // the setup tables it reads (the whole script is one ✎ Edit away)
+  const raws = splitStatements(sql);
+  const made = new Map(); // a setup statement's created name → its index
+  raws.forEach((r, i) => {
+    const m = /^\s*(?:--[^\n]*\n\s*)*CREATE\s+(?:OR\s+REPLACE\s+)?(?:TEMP(?:ORARY)?\s+)?(?:TABLE|VIEW|MACRO)\s+(?:IF\s+NOT\s+EXISTS\s+)?("?)([A-Za-z_][\w]*)\1/i.exec(r);
+    if (m) made.set(m[2].toLowerCase(), i);
+  });
+  // a figure: a chart (an x axis) or a table — decided from the plan, since
+  // a panel further down may not be drawn yet
+  let figs = new Set();
+  try {
+    JSON.parse(plan(sql)).forEach((st, i) => {
+      if (!st.setup && st.roles.some((r) => r[1] === "XAXIS" || r[1] === "TABLE")) figs.add(i);
+    });
+  } catch (_) {}
+  const fold = (panel) => {
+    if (panel.querySelector(":scope > .story-sql") || !figs.has(+panel.dataset.stmt)) return;
+    const raw = raws[+panel.dataset.stmt];
+    if (!raw) return;
+    const text = raw.replace(/^(?:\s*--[^\n]*\n)+/, "").trim();
+    const reads = [...made.keys()].filter((n) => new RegExp(`\\b${n}\\b`, "i").test(text));
+    const d = document.createElement("details");
+    d.className = "story-sql";
+    const sum = document.createElement("summary");
+    sum.textContent = "How this is computed";
+    const pre = document.createElement("pre");
+    const code = document.createElement("code");
+    code.textContent = text + ";";
+    pre.appendChild(code);
+    d.append(sum, pre);
+    if (reads.length) {
+      const note = document.createElement("p");
+      note.className = "story-sql-reads";
+      note.textContent = `Reads ${reads.join(", ")} — built in the setup at the top of the script (✎ Edit shows it).`;
+      d.appendChild(note);
+    }
+    panel.appendChild(d);
+  };
+  // #1381: the header's `-- @term`s — the first use of each in a part is
+  // underlined and explains itself (storyTermPop)
+  const terms = (meta.terms || []).map(([t, d]) => ({
+    t,
+    d,
+    re: new RegExp(`(^|[^\\p{L}\\p{N}])(${t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})(?![\\p{L}\\p{N}])`, "iu"),
+  }));
+  const markTerms = () => {
+    if (!terms.length) return;
+    for (const pane of dash.querySelectorAll(":scope > .tabwrap > .tabpane")) {
+      const done = new Set([...pane.querySelectorAll(".story-term")].map((e) => e.dataset.term));
+      for (const body of pane.querySelectorAll(".md-body")) {
+        for (const term of terms) {
+          if (done.has(term.t)) continue;
+          const walk = document.createTreeWalker(body, NodeFilter.SHOW_TEXT, {
+            acceptNode: (n) => (n.parentElement.closest("a, code, pre, .story-term, .md-math, summary") ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT),
+          });
+          for (let n = walk.nextNode(); n; n = walk.nextNode()) {
+            const m = term.re.exec(n.data);
+            if (!m) continue;
+            const at = m.index + m[1].length;
+            const rest = n.splitText(at);
+            rest.splitText(m[2].length);
+            const span = document.createElement("span");
+            span.className = "story-term";
+            span.tabIndex = 0;
+            span.dataset.term = term.t;
+            span.dataset.def = term.d;
+            span.textContent = rest.data;
+            rest.replaceWith(span);
+            done.add(term.t);
+            break;
+          }
+        }
+      }
+    }
+  };
+  // #1379: `{{@name}}` in a story's text is where the input of variable
+  // `name` goes — moved into the sentence, its caption kept as its label for
+  // screen readers; a bar it leaves empty is hidden
+  const inlineInputs = () => {
+    for (const body of dash.querySelectorAll(":scope > .tabwrap .md-body")) {
+      if (!body.textContent.includes("{{@")) continue;
+      const walk = document.createTreeWalker(body, NodeFilter.SHOW_TEXT);
+      const hits = [];
+      for (let n = walk.nextNode(); n; n = walk.nextNode()) if (/\{\{@[A-Za-z_]\w*\}\}/.test(n.data)) hits.push(n);
+      for (const n of hits) {
+        const m = /\{\{@([A-Za-z_]\w*)\}\}/.exec(n.data);
+        const name = m[1].toLowerCase();
+        const ctl = [...dash.querySelectorAll("[data-varname]")].find(
+          (e) => (e.dataset.varname || "").toLowerCase() === name && !e.closest(".story-inline-slot"),
+        );
+        if (!ctl) continue;
+        const rest = n.splitText(m.index);
+        rest.splitText(m[0].length);
+        const slot = document.createElement("span");
+        slot.className = "story-inline-slot";
+        const home = ctl.parentElement;
+        // its caption: a text node or a bare element ("Units sold:") before the control
+        const caption = [...ctl.childNodes].find(
+          (c) => (c.nodeType === 3 && c.data.trim()) || (c.nodeType === 1 && !c.querySelector("input,select,button,summary") && /:\s*$/.test(c.textContent)),
+        );
+        if (caption) {
+          const label = caption.textContent.replace(/:\s*$/, "").trim();
+          const field = ctl.querySelector("input,select");
+          (field && !ctl.querySelector("[role=radio],[role=radiogroup] button") ? field : ctl).setAttribute("aria-label", label);
+          caption.remove();
+        }
+        ctl.classList.add("story-inline");
+        slot.appendChild(ctl);
+        rest.replaceWith(slot);
+        const bar = home?.closest(".dp-autobar, .controls");
+        if (bar && !bar.querySelector("[data-varname]")) bar.hidden = true;
+      }
+    }
+  };
+  // #1378: a chart with ::STORY steps scrolls instead of stepping — the
+  // chart stays put while its captions pass by as text cards; the card at the
+  // reading line is the step shown (above the first card: the overview)
+  const scrolly = (panel) => {
+    let box = panel.closest(".story-scrolly");
+    if (!box) {
+      const svg = panel.querySelector(".panel-svg > svg[data-story]");
+      let steps = [];
+      try {
+        steps = JSON.parse(svg?.getAttribute("data-story") || "[]");
+      } catch (_) {}
+      if (!steps.length) return;
+      box = document.createElement("div");
+      box.className = "story-scrolly";
+      panel.before(box);
+      const cards = document.createElement("div");
+      cards.className = "story-steps";
+      steps.forEach((st, i) => {
+        const c = document.createElement("div");
+        c.className = "story-step";
+        c.dataset.step = String(i + 1);
+        c.textContent = st.t;
+        cards.appendChild(c);
+      });
+      box.append(panel, cards);
+    }
+    if (box._synced) return;
+    const cards = box.querySelector(":scope > .story-steps");
+    // the step is the last card whose top has passed the reading line — a
+    // little below the chart, where the cards are read (they slide under the
+    // chart after it) — so it holds between cards
+    const sync = () => {
+      if (!box.isConnected) return;
+      const below = box.querySelector(":scope > .panel")?.getBoundingClientRect().bottom ?? 0;
+      const line = Math.min(innerHeight * 0.85, Math.max(below, 0) + (innerHeight - Math.max(below, 0)) * 0.35);
+      const passed = [...cards.children].filter((c) => c.getBoundingClientRect().top < line);
+      const on = passed.pop() || null;
+      const k = on ? +on.dataset.step : 0;
+      [...cards.children].forEach((c) => c.classList.toggle("active", c === on));
+      const p = box.querySelector(":scope > .panel");
+      if (p && !p._story) mountStories();
+      if (p?._story && p._story.step() !== k) p._story.show(k);
+    };
+    let queued = false;
+    const onScroll = () => {
+      if (queued) return;
+      queued = true;
+      requestAnimationFrame(() => ((queued = false), sync()));
+    };
+    addEventListener("scroll", onScroll, { passive: true });
+    box._synced = true;
+    // a re-run disconnects it, and the next pass over the panels reconnects
+    (dash._storyIos ||= []).push({ disconnect: () => (removeEventListener("scroll", onScroll), (box._synced = false)) });
+    sync();
+  };
+  const foldAll = () => {
+    dash.querySelectorAll(":scope > .tabwrap .panel[data-stmt]").forEach(fold);
+    dash.querySelectorAll(":scope > .tabwrap .panel[data-stmt]").forEach(scrolly);
+    markTerms();
+    inlineInputs();
+  };
+  foldAll();
+  // a panel further down is drawn later, replacing its placeholder
+  const wrap = dash.querySelector(":scope > .tabwrap");
+  if (wrap && typeof MutationObserver === "function") {
+    dash._storyMo = new MutationObserver(foldAll);
+    dash._storyMo.observe(wrap, { childList: true, subtree: true });
+  }
+  // #1377: a thin reading-progress bar under the app's bar
+  const progress = document.createElement("div");
+  progress.className = "story-progress";
+  progress.setAttribute("aria-hidden", "true");
+  dash.prepend(progress);
+  dash._storyScroll = () => {
+    const r = dash.getBoundingClientRect();
+    const span = Math.max(1, r.height - innerHeight);
+    progress.style.setProperty("--p", Math.min(1, Math.max(0, -r.top / span)).toFixed(4));
+  };
+  addEventListener("scroll", dash._storyScroll, { passive: true });
+  dash._storyScroll();
   if (!btns.length || typeof IntersectionObserver !== "function") return;
   const seen = new Set();
   dash._storySpy = new IntersectionObserver(
     (entries) => {
       for (const e of entries) e.isIntersecting ? seen.add(e.target) : seen.delete(e.target);
-      const cur = panes.find((p) => seen.has(p));
-      btns.forEach((b, i) => b.classList.toggle("active", panes[i] === cur));
+      const cur = panes.findIndex((p) => seen.has(p));
+      if (cur < 0) return;
+      // the part in view is marked; the parts above it read as done
+      btns.forEach((b, i) => {
+        b.classList.toggle("active", i === cur);
+        b.classList.toggle("read", i < cur);
+      });
+      // a bar that scrolls sideways (phones) keeps the part in view visible
+      const bar = btns[cur].parentElement;
+      if (bar.scrollWidth > bar.clientWidth + 1)
+        bar.scrollTo({ left: btns[cur].offsetLeft - (bar.clientWidth - btns[cur].offsetWidth) / 2, behavior: "auto" });
     },
     { root: null, rootMargin: "-20% 0px -60% 0px" },
   );
   panes.forEach((p) => dash._storySpy.observe(p));
+}
+
+// #1376: in a story, a link to `#part-N` (from its text or a heading) scrolls
+// to that part instead of changing the address's fragment (the builder keeps
+// its shared SQL there); a story opened with ?tab=<part> starts at that part.
+document.addEventListener("click", (e) => {
+  const a = e.target.closest?.('.dash.dp-story a[href^="#part-"]:not(.story-anchor)');
+  if (!a) return;
+  const pane = document.getElementById(a.getAttribute("href").slice(1));
+  if (!pane) return;
+  e.preventDefault();
+  pane.scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "start" });
+});
+// #1381: the one popover a story's terms share — on hover, focus or tap;
+// Esc, leaving or a tap elsewhere hides it. Plain text, never markup.
+let storyTermPop = null;
+let storyTermEl = null;
+function storyTermShow(el) {
+  storyTermEl = el;
+  if (!storyTermPop) {
+    storyTermPop = document.createElement("div");
+    storyTermPop.className = "story-term-pop";
+    storyTermPop.setAttribute("role", "tooltip");
+    storyTermPop.id = "story-term-pop";
+    document.body.appendChild(storyTermPop);
+  }
+  storyTermPop.replaceChildren();
+  const b = document.createElement("strong");
+  b.textContent = el.dataset.term;
+  storyTermPop.append(b, document.createTextNode(" — " + el.dataset.def));
+  el.setAttribute("aria-describedby", "story-term-pop");
+  storyTermPop.hidden = false;
+  const r = el.getBoundingClientRect();
+  const w = Math.min(320, innerWidth - 24);
+  storyTermPop.style.width = `${w}px`;
+  storyTermPop.style.left = `${Math.max(12, Math.min(innerWidth - w - 12, r.left))}px`;
+  storyTermPop.style.top = `${r.bottom + 6}px`;
+}
+function storyTermHide() {
+  if (storyTermPop) storyTermPop.hidden = true;
+}
+for (const [ev, on] of [["mouseover", true], ["focusin", true], ["mouseout", false], ["focusout", false]])
+  document.addEventListener(ev, (e) => {
+    const t = e.target.closest?.(".story-term");
+    if (t) on ? storyTermShow(t) : storyTermHide();
+  });
+document.addEventListener("click", (e) => {
+  const t = e.target.closest?.(".story-term");
+  t ? storyTermShow(t) : storyTermHide();
+});
+document.addEventListener("keydown", (e) => e.key === "Escape" && storyTermHide());
+// on scroll the popover follows its term while that is still hovered or
+// focused (focusing a term can scroll it into view), else it goes
+addEventListener(
+  "scroll",
+  () => {
+    if (!storyTermPop || storyTermPop.hidden) return;
+    const el = storyTermEl;
+    el?.isConnected && (el.matches(":hover") || el === document.activeElement) ? storyTermShow(el) : storyTermHide();
+  },
+  { passive: true },
+);
+function storyStartAt(dash) {
+  if (dash._storyStarted || !dash.classList.contains("dp-story")) return;
+  dash._storyStarted = true;
+  const tab = new URLSearchParams(location.search).get("tab");
+  if (!tab) return;
+  const i = [...dash.querySelectorAll(":scope > .tabbar > .tab-btn")].findIndex((b) => b.textContent === tab);
+  if (i > 0) dash.querySelectorAll(":scope > .tabwrap > .tabpane")[i]?.scrollIntoView({ block: "start" });
 }
 // A story section's heading (#1367), across the section's grid.
 function storyHeading(tag, name) {
