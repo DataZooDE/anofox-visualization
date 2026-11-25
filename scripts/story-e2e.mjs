@@ -2,8 +2,9 @@
 // article — every tab is a section under its heading (all shown), the tab bar
 // is their table of contents and scrolls to a section, sub-tabs are
 // sub-sections (their bar hidden), ::MARKDOWN is plain, and an input sits in
-// its section next to what it controls (`-- @inputs auto` by default). The
-// same SQL without the header keeps tabs.
+// its section next to what it controls (`-- @inputs auto` by default), the
+// opening shows the header's title, and the contents mark the section in
+// view. The same SQL without the header keeps tabs.
 //
 //   bash scripts/build-wasm-pkg.sh
 //   python3 serve_nocache.py 8798 &
@@ -83,12 +84,22 @@ const state = (page) =>
   check(s.mdPlain, "(a) ::MARKDOWN is plain by default");
   check(s.barInSection, "(a) the input sits in the section it controls");
   check(s.width <= 1040.5, `(a) a reading column (${Math.round(s.width)} px)`);
+  const hero = await page.evaluate(() => ({
+    title: document.querySelector(".dash > .story-hero .story-title")?.textContent,
+    meta: document.querySelector(".dash > .story-hero .story-meta")?.textContent,
+    before: document.querySelector(".dash > .story-hero")?.nextElementSibling?.matches(".grid"),
+  }));
+  check(hero.title === "Returns" && hero.before, `(a) the opening shows the -- @title above the page (${hero.title})`);
+  check(/2 parts/.test(hero.meta || ""), `(a) …with the number of parts (${hero.meta})`);
   if (shot) await page.screenshot({ path: shot, fullPage: true });
   const y0 = await page.evaluate(() => scrollY);
   await page.evaluate(() => document.querySelectorAll(".dash > .tabbar > .tab-btn")[1].click());
   await page.waitForTimeout(300);
   const after = await page.evaluate(() => ({ y: scrollY, shown: [...document.querySelectorAll(".dash > .tabwrap > .tabpane")].filter((p) => p.style.display !== "none").length }));
   check(after.y > y0 && after.shown === 2, `(a) a contents entry scrolls to its section (${y0} → ${after.y}), nothing hides`);
+  await page.waitForTimeout(300);
+  const cur = await page.evaluate(() => document.querySelector(".dash > .tabbar > .tab-btn.active")?.textContent);
+  check(cur === "Why it breaks", `(a) the contents mark the section in view (${cur})`);
   // the input still drives its chart
   await page.selectOption(".dp-autobar select", "store");
   await page.waitForFunction(() => !document.body.classList.contains("loading"), null, { timeout: 60000 });
@@ -105,6 +116,7 @@ const state = (page) =>
   check(!s.story, "(b) no dp-story");
   check(s.shownPanes === 1 && !s.h2.length, `(b) one tab shown, no section headings (${s.shownPanes})`);
   check(!s.mdPlain, "(b) ::MARKDOWN keeps the callout default");
+  check(!(await page.evaluate(() => !!document.querySelector(".story-hero"))), "(b) no story opening");
   check(!errs.length, "(b) no page errors: " + errs.join(" | "));
   await page.close();
 }
