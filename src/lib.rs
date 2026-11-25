@@ -1598,6 +1598,41 @@ fn mapped_scale(
     )
 }
 
+/// The colour of `level` as the chart's category scale draws it: from the
+/// `::COLORS` level map when the chart has one ([`mapped_scale`]'s order),
+/// else [`dz_scale`]'s. A band or any other layer keyed to one series uses it,
+/// so it never disagrees with that series' line.
+fn level_color(
+    o: &RenderOptions,
+    col: &Column,
+    cols: &[Column],
+    level: &str,
+) -> Option<(u8, u8, u8)> {
+    let spec = cols
+        .iter()
+        .find(|c| c.role == Role::GaugeColors)
+        .and_then(|c| c.values.first())
+        .map(value_str)
+        .filter(|s| thresholds::is_level_map(s));
+    if let Some(map) = spec.and_then(|s| thresholds::parse_level_colors(&s).ok()) {
+        if let Some((_, c)) = map.iter().find(|(m, _)| m == level) {
+            return Some(c.rgb(&o.theme));
+        }
+        let present = distinct_labels(col);
+        let named = map.iter().filter(|(m, _)| present.contains(m)).count();
+        let i = named
+            + present
+                .iter()
+                .filter(|l| !map.iter().any(|(m, _)| m == *l))
+                .position(|l| l == level)?;
+        let c = dz_color(o, i);
+        return Some((c.r, c.g, c.b));
+    }
+    let i = distinct_labels(col).iter().position(|l| l == level)?;
+    let c = parse_hex(level).unwrap_or_else(|| dz_color(o, i));
+    Some((c.r, c.g, c.b))
+}
+
 /// [`dz_scale`], or the `::COLORS` level map's scale when the chart has one.
 fn category_scale(
     o: &RenderOptions,
@@ -1608,12 +1643,10 @@ fn category_scale(
     mapped_scale(o, aesthetic.clone(), col, cols).unwrap_or_else(|| dz_scale(o, aesthetic, col))
 }
 
-/// The colour [`dz_scale`] gives the last (sorted) level of `col`.
-fn last_level_color(o: &RenderOptions, col: &Column) -> Option<(u8, u8, u8)> {
+/// The colour the chart gives the last (sorted) level of `col`.
+fn last_level_color(o: &RenderOptions, col: &Column, cols: &[Column]) -> Option<(u8, u8, u8)> {
     let levels = distinct_labels(col);
-    let i = levels.len().checked_sub(1)?;
-    let c = parse_hex(&levels[i]).unwrap_or_else(|| dz_color(o, i));
-    Some((c.r, c.g, c.b))
+    level_color(o, col, cols, levels.last()?)
 }
 
 /// The [`dz_scale`] colour of the series (`col`'s level) of the row with the
@@ -1621,6 +1654,7 @@ fn last_level_color(o: &RenderOptions, col: &Column) -> Option<(u8, u8, u8)> {
 fn band_series_color(
     o: &RenderOptions,
     col: &Column,
+    cols: &[Column],
     x: &[Value],
     band: Option<&Column>,
 ) -> Option<(u8, u8, u8)> {
@@ -1630,11 +1664,7 @@ fn band_series_color(
         .filter_map(|i| Some((i, x.get(i)?.as_f64()?)))
         .max_by(|a, b| a.1.total_cmp(&b.1))?
         .0;
-    let level = value_str(&col.values[row]);
-    let levels = distinct_labels(col);
-    let i = levels.iter().position(|l| *l == level)?;
-    let c = parse_hex(&level).unwrap_or_else(|| dz_color(o, i));
-    Some((c.r, c.g, c.b))
+    level_color(o, col, cols, &value_str(&col.values[row]))
 }
 
 /// The shaded x-ranges of a `::MARKAREA` column: one per run of marked
@@ -4455,8 +4485,8 @@ fn cartesian(
     // reads as that series' uncertainty: the series of the right-most row that
     // carries a band (else the last coloured series).
     let band_color: (u8, u8, u8) = color_col
-        .and_then(|c| band_series_color(o, c, &x.values, band_lo))
-        .or_else(|| color_col.and_then(|c| last_level_color(o, c)))
+        .and_then(|c| band_series_color(o, c, cols, &x.values, band_lo))
+        .or_else(|| color_col.and_then(|c| last_level_color(o, c, cols)))
         .unwrap_or(brand);
     // The band is drawn first so the line sits on top of it; one band per
     // series. A step chart (Kaplan–Meier) gets a step ribbon in each series'

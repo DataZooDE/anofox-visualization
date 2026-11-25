@@ -134,6 +134,85 @@ const state = (page) =>
   await page.close();
 }
 
+// (a3) the reading aids (#1375–#1382): a part link, the heading link and
+// ?tab=, the progress bar, "How this is computed", a -- @term, an input
+// inside a sentence, a ::STORY chart that steps while scrolling, a phone
+{
+  const UX = `-- @title Returns
+-- @layout story
+-- @term wave: the returns of one sale, spread over weeks
+CREATE OR REPLACE TEMP TABLE sales AS
+  SELECT DATE '2026-01-01' + INTERVAL (i) DAY AS day, 50 + 20 * sin(i / 5.0) + (i % 7) AS units FROM range(60) t(i);
+SELECT 'Jump to [the end](#part-2).'::MARKDOWN;
+SELECT 'Start'::TAB;
+SELECT 'A sale comes back as a wave, not a peak.'::MARKDOWN;
+SELECT day::XAXIS, units::LINECHART, CASE WHEN day IN (DATE '2026-01-10', DATE '2026-02-10') THEN 'Step on ' || strftime(day, '%-d %B') END ::STORY FROM sales ORDER BY day;
+SELECT 'End'::TAB;
+SELECT 3 AS k ::NUMBER, 'Days'::LABEL;
+SELECT 'Look back {{@k}} days: {{n}} units.'::MARKDOWN, round(sum(units)) AS n FROM sales WHERE day >= DATE '2026-03-01' - INTERVAL (coalesce(getvariable('k'), 3)) DAY;
+SELECT day::XAXIS, units::BARCHART FROM sales;
+${Array.from({ length: 12 }, (_, i) => `SELECT 'Filler paragraph ${i} so the page scrolls.'::MARKDOWN;`).join("\n")}
+`;
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 }, reducedMotion: "reduce", permissions: ["clipboard-read", "clipboard-write"] });
+  const page = await ctx.newPage();
+  const errs = [];
+  page.on("pageerror", (e) => errs.push(String(e)));
+  const ready = () =>
+    page.waitForFunction(() => /\d+ panels?/.test(document.getElementById("status")?.textContent || "") && !document.body.classList.contains("loading"), null, { timeout: 120000 });
+  await page.goto(`${base}?mode=view#sql=${b64(UX)}`);
+  await ready();
+  await page.waitForTimeout(500);
+  check(await page.evaluate(() => !!document.querySelector(".dash > .story-progress")), "(a3) a reading-progress bar");
+  await page.click('.dash a[href="#part-2"]');
+  await page.waitForTimeout(500);
+  const jumped = await page.evaluate(() => ({ hash: location.hash.slice(0, 12), top: Math.round(document.getElementById("part-2").getBoundingClientRect().top) }));
+  check(!/part-2/.test(jumped.hash) && jumped.top < 200, `(a3) a #part-N link scrolls there, the address keeps its own fragment (top ${jumped.top})`);
+  await page.hover("#part-2 > h2.story-h");
+  await page.click("#part-2 .story-anchor");
+  await page.waitForTimeout(200);
+  const copied = await page.evaluate(() => navigator.clipboard.readText());
+  check(/[?&]tab=End(&|$)/.test(copied), `(a3) the heading link copies ?tab=End (${copied.slice(0, 80)}…)`);
+  const folds = await page.evaluate(() => [...document.querySelectorAll(".story-sql code")].map((c) => c.textContent));
+  check(folds.length === 2 && folds.every((t) => /::(LINECHART|BARCHART)/.test(t) && /FROM sales/.test(t)), `(a3) each chart has its SQL folded (${folds.length})`);
+  check(await page.evaluate(() => /sales/.test(document.querySelector(".story-sql-reads")?.textContent || "")), "(a3) …naming the setup table it reads");
+  const term = await page.evaluate(() => [...document.querySelectorAll(".story-term")].map((t) => t.textContent));
+  check(term.length === 1 && term[0] === "wave", `(a3) the -- @term is marked once in its part (${term})`);
+  await page.focus(".story-term");
+  check(await page.evaluate(() => { const p = document.querySelector(".story-term-pop"); return !!p && !p.hidden && /spread over weeks/.test(p.textContent); }), "(a3) …and explains itself on focus");
+  const inl = await page.evaluate(() => { const b = [...document.querySelectorAll(".md-body")].find((x) => /Look back/.test(x.textContent)); return { ctl: !!b?.querySelector(".story-inline input"), raw: /\{\{@/.test(b?.textContent || "") }; });
+  check(inl.ctl && !inl.raw, "(a3) {{@k}} puts the input of k inside the sentence");
+  const before = await page.evaluate(() => [...document.querySelectorAll(".md-body")].find((x) => /Look back/.test(x.textContent)).textContent);
+  await page.fill(".story-inline input", "10");
+  await page.press(".story-inline input", "Enter");
+  await page.waitForTimeout(800);
+  await ready();
+  const after = await page.evaluate(() => [...document.querySelectorAll(".md-body")].find((x) => /Look back/.test(x.textContent))?.textContent);
+  check(after && after !== before && !!(await page.$(".story-inline input")), "(a3) …and changing it updates the sentence, the input staying in it");
+  // the ::STORY chart steps while scrolling
+  const box = await page.$(".story-scrolly");
+  check(!!box, "(a3) a ::STORY chart scrolls (cards beside a sticky chart)");
+  if (box) {
+    const top = await box.evaluate((e) => e.getBoundingClientRect().top + scrollY);
+    const h = await box.evaluate((e) => e.offsetHeight);
+    const seen = new Set();
+    for (let dy = 0; dy < h; dy += 150) {
+      await page.evaluate((y) => scrollTo(0, y), top + dy);
+      await page.waitForTimeout(120);
+      seen.add(await box.evaluate((b) => b.querySelector(".panel")?._story?.step?.()));
+    }
+    check(seen.has(0) && seen.has(1) && seen.has(2), `(a3) …stepping 0 → 1 → 2 as it scrolls (${[...seen].join(",")})`);
+  }
+  check(!errs.length, "(a3) no page errors: " + errs.join(" | "));
+  await ctx.close();
+  // a phone: no sideways scrolling, the contents one row
+  const phone = await browser.newPage({ viewport: { width: 390, height: 844 }, reducedMotion: "reduce" });
+  await phone.goto(`${base}?mode=view#sql=${b64(UX)}`);
+  await phone.waitForFunction(() => /\d+ panels?/.test(document.getElementById("status")?.textContent || ""), null, { timeout: 120000 });
+  const ph = await phone.evaluate(() => ({ sw: document.documentElement.scrollWidth, w: innerWidth, rows: new Set([...document.querySelectorAll(".dash > .tabbar > .tab-btn")].map((b) => Math.round(b.getBoundingClientRect().top))).size }));
+  check(ph.sw <= ph.w && ph.rows === 1, `(a3) on a phone: no sideways scroll, contents in one row (${JSON.stringify(ph)})`);
+  await phone.close();
+}
+
 // (b) without the header: tabs as before
 {
   const { page, errs } = await open(`-- @title Returns\n${BODY}`);
