@@ -654,6 +654,20 @@ body.dark .dp-img-row.has-dark .dp-img-missing{display:none}
 .tab-btn.active::after{content:"";position:absolute;left:.7rem;right:.7rem;bottom:-1px;height:3px;background:var(--ax-accent-bar);border-radius:3px 3px 0 0;box-shadow:var(--ax-accent-glow)}
 .tabpane{margin-bottom:1rem}
 .subtabbar{grid-column:1/-1;display:flex;flex-wrap:wrap;gap:.3rem;margin:0 0 1rem;padding:.25rem;background:var(--ax-subtab-bg);border-radius:10px}
+/* -- @layout story (#1367): one scrolling article. Tabs are sections one
+   after another under their headings; the tab bar is their table of contents;
+   prose keeps a reading width, charts and tables the column's. */
+.dash.dp-story{width:100%;max-width:1040px;margin-inline:auto;flex-direction:column;align-items:stretch}
+.dp-story>.grid:empty{display:none}
+.dp-story>.tabbar{border-bottom:0;margin-bottom:.4rem}
+.dp-story>.tabbar .tab-btn{padding:.3rem .7rem;font-size:.85rem;color:var(--ax-tab-ink)}
+.dp-story>.tabbar .tab-btn.active::after{display:none}
+.dp-story .subtabbar{display:none}
+.dp-story .tabpane+.tabpane{margin-top:2.2rem}
+.dp-story .story-h{grid-column:1/-1;margin:.6rem 0 0;font-family:var(--ax-font-display);font-size:1.45rem;letter-spacing:-.015em;color:var(--ax-ink)}
+.dp-story h3.story-h{font-size:1.12rem;margin-top:1.2rem}
+.dp-story .md-plain{padding-inline:0}
+.dp-story .md-plain .md-body{max-width:68ch;font-size:1rem;line-height:1.7}
 .subtab-btn{border-radius:8px;border-bottom:0;padding:.4rem .85rem;font-size:.83rem}
 .subtab-btn:hover{background:var(--ax-pill-hover)}
 .subtab-btn.active{color:var(--ax-accent-ink);background:var(--ax-btn-bg);border-bottom:0}

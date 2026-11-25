@@ -441,13 +441,14 @@ pub fn diags(plan: &[Panel]) -> Vec<Diagnostic> {
 
 /// `-- @inputs auto` in the header (the first statement), the last
 /// `auto` / `manual` there winning (#950): the page places the loose inputs
-/// by what they control ([`placement`]) instead of where they stand.
+/// by what they control ([`placement`]) instead of where they stand. Without
+/// either word, on for a `-- @layout story` (#1367).
 pub fn auto_on(script: &str) -> bool {
     crate::sql::ask::raw_statements(script)
         .first()
         .map(|raw| {
-            raw.lines()
-                .filter_map(|l| l.trim().strip_prefix("--"))
+            let header = || raw.lines().filter_map(|l| l.trim().strip_prefix("--"));
+            header()
                 .filter_map(|l| l.trim().strip_prefix("@inputs"))
                 .filter(|rest| rest.starts_with(char::is_whitespace))
                 .filter_map(|rest| match rest.trim() {
@@ -456,7 +457,12 @@ pub fn auto_on(script: &str) -> bool {
                     _ => None,
                 })
                 .next_back()
-                .unwrap_or(false)
+                // #1367: a story places its inputs unless it says `manual`
+                .unwrap_or_else(|| {
+                    header()
+                        .filter_map(|l| l.trim().strip_prefix("@layout"))
+                        .any(|rest| rest.trim().eq_ignore_ascii_case("story"))
+                })
         })
         .unwrap_or(false)
 }
@@ -902,6 +908,11 @@ mod tests {
             "SELECT 1::TEXT;\n-- @inputs auto\nSELECT 2::TEXT;"
         ));
         assert!(!auto_on("-- @inputsauto\nSELECT 1::TEXT;"));
+        // #1367
+        assert!(auto_on("-- @layout story\nSELECT 1::TEXT;"));
+        assert!(!auto_on(
+            "-- @layout story\n-- @inputs manual\nSELECT 1::TEXT;"
+        ));
     }
 
     #[test]

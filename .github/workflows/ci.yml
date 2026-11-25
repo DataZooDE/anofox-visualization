@@ -753,6 +753,13 @@ jobs:
         timeout-minutes: 10
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/astables-e2e.mjs --url http://127.0.0.1:8947/
 
+      # scripts/story-e2e.mjs (#1367): `-- @layout story` shows every tab as a
+      # section (headings, contents that scroll), sub-tabs as sub-sections,
+      # plain prose, inputs by what they control; without it, tabs as before.
+      - name: Story layout e2e (#1367)
+        timeout-minutes: 10
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/story-e2e.mjs --url http://127.0.0.1:8947/
+
       # scripts/table-fit-e2e.mjs (#1026): a table a little too wide for its
       # card tightens its padding and fits; one far too wide still scrolls
       # sideways with the "more columns" fade (#996).
