@@ -1277,6 +1277,13 @@ pub struct DashboardMeta {
     /// reader then falls back to 'callout'. See
     /// [`crate::roles::resolve_markdown_style`].
     pub markdown_style: Option<String>,
+    /// `-- @layout story` (#1367): the page as one scrolling article —
+    /// tabs become sections one after another, prose in a reading column,
+    /// each input above what it controls (`-- @inputs auto` unless the
+    /// header says `manual`), `::MARKDOWN` plain unless `-- @markdown_style`
+    /// says otherwise. `None` for the usual grid (`grid`, or an unrecognized
+    /// value: lint warns, `header/bad-layout`).
+    pub layout: Option<String>,
     /// `-- @tour <id> [title]` blocks (#518 PR B), in file order. See
     /// [`parse_dashboard_meta`] for the syntax and [`Tour`] for the fields.
     pub tours: Vec<Tour>,
@@ -1588,6 +1595,9 @@ pub fn parse_dashboard_meta(id: &str, script: &str) -> DashboardMeta {
             // an unrecognized value leaves it unset — every reader then
             // falls back to 'callout' (lint warns: header/bad-markdown-style)
             m.markdown_style = crate::roles::markdown_style_of(r).map(str::to_string);
+        } else if let Some(r) = header_value(l, "layout") {
+            // `grid` (the default) and anything unrecognized: no layout
+            m.layout = (r.eq_ignore_ascii_case("story")).then(|| "story".to_string());
         } else if let Some(r) = header_value(l, "tags") {
             for t in split_tags(r) {
                 if m.tags.len() < MAX_TAGS && !m.tags.contains(&t) {
@@ -1643,6 +1653,10 @@ pub fn parse_dashboard_meta(id: &str, script: &str) -> DashboardMeta {
                 }
             }
         }
+    }
+    // #1367: a story reads as text, so its ::MARKDOWN is plain by default
+    if m.layout.is_some() && m.markdown_style.is_none() {
+        m.markdown_style = Some("plain".to_string());
     }
     m
 }
@@ -2834,6 +2848,24 @@ mod tests {
         assert!(parse_dashboard_meta("s", "-- @astables off\n-- @astables on\nSELECT 1;").astables);
         // #536: the dashboard's own ::MARKDOWN_STYLE default; a bad/missing
         // value is `None`, same as not setting it; a later one wins.
+        // #1367: a story's default is plain; its own header still wins
+        let story = parse_dashboard_meta("s", "-- @layout story\nSELECT 1;");
+        assert_eq!(story.layout.as_deref(), Some("story"));
+        assert_eq!(story.markdown_style.as_deref(), Some("plain"));
+        let card =
+            parse_dashboard_meta("s", "-- @markdown_style card\n-- @layout Story\nSELECT 1;");
+        assert_eq!(
+            (card.layout.as_deref(), card.markdown_style.as_deref()),
+            (Some("story"), Some("card"))
+        );
+        assert_eq!(
+            parse_dashboard_meta("s", "-- @layout grid\nSELECT 1;").layout,
+            None
+        );
+        assert_eq!(
+            parse_dashboard_meta("s", "-- @layout essay\nSELECT 1;").layout,
+            None
+        );
         assert_eq!(parse_dashboard_meta("s", "SELECT 1;").markdown_style, None);
         assert_eq!(
             parse_dashboard_meta("s", "-- @markdown_style plain\nSELECT 1;").markdown_style,

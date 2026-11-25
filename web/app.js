@@ -10842,6 +10842,9 @@ async function runOnce(fresh = true, pv = preview) {
   // ::CALLOUT, which always draws 'callout') overrides it. See
   // resolveMdStyle() / mdStyleDefault().
   const dpMdStyleDefault = mdStyleDefault(pv ? pv.sql : $("sql").value);
+  // #1367: `-- @layout story` — tabs become sections one after another
+  // (headings; the tab bar is their table of contents), see storyOn().
+  const dpStory = storyOn(pv ? pv.sql : $("sql").value);
   markPending(grid, stmts, fresh);
   if (fresh) {
     dpSetupRan = new Map();
@@ -11228,7 +11231,8 @@ async function runOnce(fresh = true, pv = preview) {
   let nextIa = {}; // ::SELECT_AS → the next chart's interactions (see dpIa)
   let nextEmpty = ""; // ::EMPTY → the next panel's message for an empty result
   let lastChart = null; // the holder of the chart a ::TRACK right after it goes under
-  let defaultSpan = Math.max(1, Math.round(12 / dpCols)); // 12-col bootstrap default
+  // 12-col bootstrap default; a story (#1367) reads top to bottom, full width
+  let defaultSpan = dpStory ? 12 : Math.max(1, Math.round(12 / dpCols));
   let panels = 0;
   // Auto-pack a top-level run of >=2 consecutive KPI tiles (::METRIC/::COMPACT/
   // ::MONEY/::PERCENT, no ::TABLE) into one compact strip, so a plain dashboard
@@ -12331,13 +12335,20 @@ async function runOnce(fresh = true, pv = preview) {
         }
         const pane = document.createElement("div");
         pane.className = "grid tabpane";
-        pane.style.display = "none";
+        pane.style.display = dpStory ? "" : "none";
         tabWrap.appendChild(pane);
         const btn = document.createElement("button");
         btn.className = "tab-btn";
         btn.textContent = name;
         tagName(btn, s);
-        btn.onclick = (e) => {
+        if (dpStory) {
+          // a section: its heading, and the bar's button scrolls to it
+          pane.appendChild(storyHeading("h2", name));
+          btn.onclick = (e) => {
+            e.stopPropagation();
+            pane.scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "start" });
+          };
+        } else btn.onclick = (e) => {
           e.stopPropagation();
           dpTab = name; // remember, so a cross-filter re-run keeps this tab
           setTabParam(name); // deep-link: reflect the active tab in the URL
@@ -12348,7 +12359,9 @@ async function runOnce(fresh = true, pv = preview) {
           lazyShown(pane);
         };
         tabBar.appendChild(btn);
-        if (dpTab === name || (dpTab === null && tabBar.children.length === 1)) {
+        if (dpStory) {
+          // every section is shown
+        } else if (dpTab === name || (dpTab === null && tabBar.children.length === 1)) {
           pane.style.display = "";
           btn.classList.add("active");
         }
@@ -12371,8 +12384,10 @@ async function runOnce(fresh = true, pv = preview) {
         }
         const spane = document.createElement("div");
         spane.className = "grid subtabpane";
-        spane.style.display = "none";
+        spane.style.display = dpStory ? "" : "none";
         subWrap.appendChild(spane);
+        // #1367: in a story, a sub-tab is a sub-section under its heading
+        if (dpStory) spane.appendChild(storyHeading("h3", name));
         const sbtn = document.createElement("button");
         sbtn.className = "tab-btn subtab-btn";
         sbtn.textContent = name;
@@ -12395,7 +12410,9 @@ async function runOnce(fresh = true, pv = preview) {
         };
         subBar.appendChild(sbtn);
         const activeSub = dpSubTab[topName];
-        if (activeSub === name || (activeSub == null && subBar.children.length === 1)) {
+        if (dpStory) {
+          // every sub-section is shown (the sub-tab bar is hidden)
+        } else if (activeSub === name || (activeSub == null && subBar.children.length === 1)) {
           spane.style.display = "";
           sbtn.classList.add("active");
         }
@@ -12977,6 +12994,7 @@ async function runOnce(fresh = true, pv = preview) {
     if (!fresh) for (const p of slotsOf(newRoots)) if (old.has(p.dataset.stmt)) swaps.push([old.get(p.dataset.stmt), p]);
   }
   dash._shape = shape;
+  dash.classList.toggle("dp-story", dpStory);
   for (const img of candidateBlobImgs) if (!img.isConnected) URL.revokeObjectURL(img.dataset.anofoxBlob);
   // #554 review (N2): mark this run's own sweep as having happened, so a
   // same-run fetch that resolves *after* this point (too slow to make
@@ -15960,6 +15978,21 @@ function resolveMdChrome(explicit, calloutPresent, toneValue, dashboardDefault) 
       ? "card"
       : resolveMdStyle(explicit, calloutPresent, dashboardDefault);
   return { style, tone: style === "card" && tone && tone.tone !== "neutral" ? tone : null };
+}
+// #1367: `-- @layout story` in this dashboard's header.
+function storyOn(sql) {
+  try {
+    return JSON.parse(dashboard_meta(sql)).layout === "story";
+  } catch (_) {
+    return false;
+  }
+}
+// A story section's heading (#1367), across the section's grid.
+function storyHeading(tag, name) {
+  const h = document.createElement(tag);
+  h.className = "story-h";
+  h.textContent = name;
+  return h;
 }
 // This dashboard's own `-- @markdown_style` default, or null without the
 // header / with an unrecognized value — see astablesBarOn() for the pattern.

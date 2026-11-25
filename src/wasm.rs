@@ -806,7 +806,7 @@ pub fn threshold_rules(spec: &str) -> String {
 }
 
 /// A dashboard's header comments as `{"title","nav","group","tags","refresh",
-/// "description","owner","certified","astables","markdown_style","tours",
+/// "description","owner","certified","astables","markdown_style","layout","tours",
 /// "tour_autostart"}`, read by the parser the servers use
 /// ([`crate::host::serving::parse_dashboard_meta`]), so the builder's sidebar
 /// and a served folder place a dashboard alike. `title` is "" without
@@ -838,13 +838,13 @@ pub fn dashboard_meta(script: &str) -> String {
             "title": m.title, "nav": m.nav, "group": m.group, "tags": m.tags,
             "refresh": m.refresh, "description": m.description, "owner": m.owner,
             "certified": m.certified, "astables": m.astables,
-            "markdown_style": m.markdown_style,
+            "markdown_style": m.markdown_style, "layout": m.layout,
             "tours": tours, "tour_autostart": m.tour_autostart,
         })
         .to_string())
     })
     .unwrap_or_else(|_| {
-        r#"{"title":"","nav":null,"group":null,"tags":[],"refresh":0,"description":null,"owner":null,"certified":null,"astables":false,"markdown_style":null,"tours":[],"tour_autostart":null}"#.into()
+        r#"{"title":"","nav":null,"group":null,"tags":[],"refresh":0,"description":null,"owner":null,"certified":null,"astables":false,"markdown_style":null,"layout":null,"tours":[],"tour_autostart":null}"#.into()
     })
 }
 

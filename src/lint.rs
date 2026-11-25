@@ -88,7 +88,8 @@ pub struct Diagnostic {
     /// off unless a viewer turns it on) | `header/bad-markdown-style` (not
     /// `plain`/`card`/`callout`, so `-- @markdown_style` is ignored —
     /// `::MARKDOWN` panels without their own `::MARKDOWN_STYLE` fall back to
-    /// 'callout') | `header/bad-inputs` (not `auto`/`manual`, #950). A served folder
+    /// 'callout') | `header/bad-inputs` (not `auto`/`manual`, #950) |
+    /// `header/bad-layout` (not `story`/`grid`, #1367). A served folder
     /// ([`folder_diags`], warnings): `folder/duplicate-title` (two
     /// dashboards that would show the same label in the nav / `/` list —
     /// their `-- @nav`, or `-- @title` without one) | `folder/bad-id` |
@@ -3852,6 +3853,7 @@ fn other_header_line(l: &str) -> bool {
         "astables",
         "tags",
         "inputs",
+        "layout",
     ]
     .iter()
     .any(|k| header_value(l, k).is_some())
@@ -5457,6 +5459,17 @@ pub fn header_diags(script: &str) -> Vec<Diagnostic> {
                          'callout'"
                     )
                 },
+                line,
+            );
+        } else if let Some(v) = header_value(line, "layout")
+            .filter(|v| !v.eq_ignore_ascii_case("story") && !v.eq_ignore_ascii_case("grid"))
+        {
+            warn(
+                "header/bad-layout",
+                format!(
+                    "`-- @layout {v}` is not `story` or `grid` — the page keeps the usual \
+                     grid with tabs"
+                ),
                 line,
             );
         } else if let Some(v) =
@@ -9758,6 +9771,9 @@ mod design_tests {
         assert!(codes("-- @inputs auto\nSELECT 1;").is_empty());
         assert!(codes("-- @inputs manual\nSELECT 1;").is_empty());
         assert_eq!(codes("-- @inputs automatic\n"), ["header/bad-inputs"]);
+        assert!(codes("-- @layout story\nSELECT 1;").is_empty());
+        assert!(codes("-- @layout grid\nSELECT 1;").is_empty());
+        assert_eq!(codes("-- @layout essay\n"), ["header/bad-layout"]);
         assert!(codes("-- @markdown_style plain\nSELECT 1;").is_empty());
         assert!(codes("-- @markdown_style card\nSELECT 1;").is_empty());
         assert!(codes("-- @markdown_style callout\nSELECT 1;").is_empty());
