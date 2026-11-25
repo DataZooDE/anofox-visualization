@@ -1348,6 +1348,13 @@ jobs:
         timeout-minutes: 5
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/views-served-e2e.mjs --ext "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
 
+      # scripts/story-served-e2e.mjs (#1367): a -- @layout story on the locked
+      # server is a story too (opening, parts, scrolling ::STORY, term, an
+      # input inside a sentence) and shows no SQL ("How this is computed").
+      - name: Story layout on the locked server (#1367)
+        timeout-minutes: 10
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/story-served-e2e.mjs --ext "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
+
       # scripts/notes-served-e2e.mjs (#889): notes on charts (options.notes) —
       # a writer adds one from the chart tools, every viewer sees it, only the
       # author or a moderator deletes it, the cross-site gate holds.

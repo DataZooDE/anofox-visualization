@@ -16083,8 +16083,9 @@ function storyChrome(dash, on, sql) {
       if (!st.setup && st.roles.some((r) => r[1] === "XAXIS" || r[1] === "TABLE")) figs.add(i);
     });
   } catch (_) {}
+  // never on a locked server: its viewers get the dashboard, not its SQL
   const fold = (panel) => {
-    if (panel.querySelector(":scope > .story-sql") || !figs.has(+panel.dataset.stmt)) return;
+    if (window.__served || panel.querySelector(":scope > .story-sql") || !figs.has(+panel.dataset.stmt)) return;
     const raw = raws[+panel.dataset.stmt];
     if (!raw) return;
     const text = raw.replace(/^(?:\s*--[^\n]*\n)+/, "").trim();
