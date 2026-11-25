@@ -250,12 +250,16 @@ SELECT chain::METRIC, 'chain forecast'::LABEL FROM rw_n;
 SELECT shortcut::METRIC, 'shortcut: sales × return rate'::LABEL FROM rw_n;
 SELECT gap_pct::PERCENT, 'chain against shortcut'::LABEL FROM rw_n;
 SELECT 'end'::ENDGROUP;
-SELECT 'The chain expects **{{chain:metric}}** parcels (a 90 % range of {{chain_lo:metric}} to {{chain_hi:metric}}), the shortcut **{{shortcut:metric}}**. In total the two are **{{gap_pct:pct}}** apart. The bigger difference is *when* the parcels arrive — and the days are what a planner staffs for. The rest of this page explains why, and checks both against what really came in.'::MARKDOWN, * FROM rw_n;
+SELECT 'The chain expects **{{chain:metric}}** parcels (a 90 % range of {{chain_lo:metric}} to {{chain_hi:metric}}), the shortcut **{{shortcut:metric}}**. In total the two are **{{gap_pct:pct}}** apart. The bigger difference is *when* the parcels arrive — and the days are what a planner staffs for. The rest of this page explains why, and checks both against what really came in.
+
+> The four-week total is not the problem. The days are.'::MARKDOWN, * FROM rw_n;
 
 SELECT 'Why the shortcut breaks'::TAB;
 SELECT 'The shortcut is what most planning sheets do: take the receipts of the last eight weeks, divide by the sales two weeks before them — here **{{rate_pct:pct}}** — and multiply that rate by the sales two weeks before each day to come.
 
-In a regular week that is close enough. Sales are steady, so the returns are steady, and one lag fits them all. It breaks when the sales are not steady. A return is not one fixed lag after its sale: some customers send the parcel back the next day, others after a month, and the parcel spends a few more days on the road. A promotion therefore does not come back as one peak two weeks later, but as a long, low wave.'::MARKDOWN, * FROM rw_n;
+In a regular week that is close enough. Sales are steady, so the returns are steady, and one lag fits them all. It breaks when the sales are not steady. A return is not one fixed lag after its sale: some customers send the parcel back the next day, others after a month, and the parcel spends a few more days on the road. A promotion therefore does not come back as one peak two weeks later, but as a long, low wave.
+
+> A sale does not come back as a peak. It comes back as a wave.'::MARKDOWN, * FROM rw_n;
 SELECT day::XAXIS, sold AS "Units sold" ::BARCHART, 'Units sold per day' ::TITLE,
        p.start_day::XBAND_FROM, p.end_day::XBAND_TO, p.promo::XBAND_LABEL
 FROM rw_sales2 s LEFT JOIN rw_promo p ON p.start_day = s.day AND NOT p.planned, rw_param r
@@ -269,7 +273,9 @@ SELECT 'The May sale (shaded) more than doubled the units sold for a week. Its r
 SELECT 'One day of sales'::TAB;
 SELECT 'To see where the wave comes from, follow one day: **1,000 units** sold on a regular day. About {{p_regular}} % of them — 200 units — will come back, but not at once. Two clocks run one after the other.
 
-The **customer''s clock**: how long until they ask to return. Most ask within the first two weeks, some much later; on average after about **{{ask_mean}} days**. The **parcel''s clock**: how long the parcel travels once they ask, on average about **{{travel_mean}} days**. Put together, half of the 200 parcels are at the warehouse after **{{half_days}} days**, nine in ten after **{{p90_days}} days**.'::MARKDOWN, * FROM rw_n;
+The **customer''s clock**: how long until they ask to return. Most ask within the first two weeks, some much later; on average after about **{{ask_mean}} days**. The **parcel''s clock**: how long the parcel travels once they ask, on average about **{{travel_mean}} days**. Put together, half of the 200 parcels are at the warehouse after **{{half_days}} days**, nine in ten after **{{p90_days}} days**.
+
+> Two clocks, one after the other: the customer''s, then the parcel''s.'::MARKDOWN, * FROM rw_n;
 SELECT k::XAXIS, 1000 * 0.2 * ask AS "Customer asks" ::LINECHART, 1000 * 0.2 * arrive AS "Parcel arrives" ::LINECHART,
        'Of 1,000 units sold on one day: returns per day after the sale' ::TITLE, 'days after the sale' ::XTITLE
 FROM rw_curve ORDER BY k;
@@ -312,7 +318,9 @@ FROM rw_fc LEFT JOIN rw_promo p ON p.start_day = rw_fc.day ORDER BY day;
 SELECT 'Shaded around the chain: the 50 % and 90 % ranges of a day''s count.'::MARKDOWN, 'caption'::MARKDOWN_STYLE;
 SELECT 'Over the four weeks the chain is **{{err_chain:pct}} {{dir_chain}}** the parcels that arrived, the ARIMA **{{err_arima:pct}} {{dir_arima}}**, the shortcut **{{err_short:pct}} {{dir_short}}**. Day by day the differences are larger: the chain misses by **{{mae_chain:metric}}** parcels on an average day — about what chance alone gives —, the ARIMA by **{{mae_arima:metric}}**, the shortcut by **{{mae_short:metric}}**, and on its worst day by {{worst_short:metric}}.
 
-The shortcut puts the May sale''s returns into one peak two weeks after the sale and then runs short while the long tail is still coming in. The ARIMA sees the sale in its inputs but has to learn from one year of receipts what a sale does — and a year holds only two sales. The chain does not learn that from the receipts at all: it knows how each unit comes back.'::MARKDOWN, * FROM rw_n;
+The shortcut puts the May sale''s returns into one peak two weeks after the sale and then runs short while the long tail is still coming in. The ARIMA sees the sale in its inputs but has to learn from one year of receipts what a sale does — and a year holds only two sales. The chain does not learn that from the receipts at all: it knows how each unit comes back.
+
+> The chain misses by about what chance alone gives.'::MARKDOWN, * FROM rw_n;
 SELECT 'Chain' AS "Method" ::TABLE, chain AS "Parcels, 4 weeks", err_chain AS "Off in total, %", mae_chain AS "Average miss per day" FROM rw_n
 UNION ALL SELECT 'ARIMA with lagged sales', arima, err_arima, mae_arima FROM rw_n
 UNION ALL SELECT 'Shortcut', shortcut, err_short, mae_short FROM rw_n
@@ -329,7 +337,9 @@ FROM rw_fc LEFT JOIN rw_storm s ON s.start_day = rw_fc.day AND s.what_if
        AND coalesce(getvariable('scenario'), 'Storm next week') = 'Storm next week'
 ORDER BY day;
 SELECT CASE WHEN coalesce(getvariable('scenario'), 'Storm next week') = 'Storm next week'
-  THEN 'During the three storm days the desk receives about **{{storm_dip:metric}}** parcels fewer than planned — and then they come at once. Over the four weeks the total stays the same; the work only moves into the days after the storm. Plan the extra shifts there, not during it.'
+  THEN 'During the three storm days the desk receives about **{{storm_dip:metric}}** parcels fewer than planned — and then they come at once. Over the four weeks the total stays the same; the work only moves into the days after the storm. Plan the extra shifts there, not during it.
+
+> A storm does not remove work. It moves it.'
   ELSE 'Without the June sale the desk receives about **{{no_sale_total:metric}}** parcels fewer over the four weeks, nearly all of them in the last two — the sale''s returns would only start to arrive in the planning window. The first two weeks stay as they are: they are the May sale''s returns, already on their way.' END ::MARKDOWN, *
 FROM rw_n;
 

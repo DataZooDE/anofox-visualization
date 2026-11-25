@@ -12996,6 +12996,7 @@ async function runOnce(fresh = true, pv = preview) {
   }
   dash._shape = shape;
   dash.classList.toggle("dp-story", dpStory);
+  storyChrome(dash, dpStory, pv ? pv.sql : $("sql").value);
   for (const img of candidateBlobImgs) if (!img.isConnected) URL.revokeObjectURL(img.dataset.anofoxBlob);
   // #554 review (N2): mark this run's own sweep as having happened, so a
   // same-run fetch that resolves *after* this point (too slow to make
@@ -15987,6 +15988,53 @@ function storyOn(sql) {
   } catch (_) {
     return false;
   }
+}
+// A story's opening and reading aids (#1367): the header's group, title and
+// description as kicker, headline and summary above everything, a reading
+// time, and the contents entry of the section in view marked as current.
+function storyChrome(dash, on, sql) {
+  dash.querySelector(":scope > .story-hero")?.remove();
+  dash._storySpy?.disconnect();
+  dash._storySpy = null;
+  if (!on) return;
+  let meta = {};
+  try {
+    meta = JSON.parse(dashboard_meta(sql));
+  } catch (_) {}
+  const hero = document.createElement("div");
+  hero.className = "story-hero";
+  const add = (tag, cls, text) => {
+    if (!text) return;
+    const e = document.createElement(tag);
+    e.className = cls;
+    e.textContent = text;
+    hero.appendChild(e);
+  };
+  add("p", "story-kicker", meta.group);
+  add("h1", "story-title", meta.title);
+  add("p", "story-dek", meta.description);
+  // the prose is still being drawn here: count the words of the script's
+  // longer string literals (its ::MARKDOWN texts) instead
+  const words = (sql.match(/'(?:[^']|'')+'/g) || [])
+    .filter((t) => t.length > 80)
+    .reduce((n, t) => n + (t.match(/[A-Za-z]{2,}/g) || []).length, 0);
+  const parts = dash.querySelectorAll(":scope > .tabwrap > .tabpane").length;
+  add("p", "story-meta", [parts > 1 ? `${parts} parts` : "", words > 150 ? `${Math.max(1, Math.round(words / 220))} min read` : ""].filter(Boolean).join(" · "));
+  if (!hero.children.length) return;
+  dash.querySelector(":scope > .grid")?.before(hero);
+  const btns = [...dash.querySelectorAll(":scope > .tabbar > .tab-btn")];
+  const panes = [...dash.querySelectorAll(":scope > .tabwrap > .tabpane")];
+  if (!btns.length || typeof IntersectionObserver !== "function") return;
+  const seen = new Set();
+  dash._storySpy = new IntersectionObserver(
+    (entries) => {
+      for (const e of entries) e.isIntersecting ? seen.add(e.target) : seen.delete(e.target);
+      const cur = panes.find((p) => seen.has(p));
+      btns.forEach((b, i) => b.classList.toggle("active", panes[i] === cur));
+    },
+    { root: null, rootMargin: "-20% 0px -60% 0px" },
+  );
+  panes.forEach((p) => dash._storySpy.observe(p));
 }
 // A story section's heading (#1367), across the section's grid.
 function storyHeading(tag, name) {
