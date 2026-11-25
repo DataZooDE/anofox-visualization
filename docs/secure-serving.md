@@ -703,7 +703,8 @@ of the authoring servers carries a
   the key includes the login, that tells a viewer only about their own earlier
   requests (or, without `auth`, that someone asked with the same values).
 - **Materialized setup** (`-- @materialize`, #727). A setup statement
-  `CREATE [OR REPLACE] TEMP TABLE t AS <query>` with a `-- @materialize` line
+  `CREATE [OR REPLACE] TEMP TABLE t AS <query>` (or `… TEMP VIEW t AS <query>`,
+  #1362: then `t` is a table on the server) with a `-- @materialize` line
   above it runs `<query>` once into a table of the server's own in-memory
   catalog (`__anofox_mat`, attached before the lockdown; the dashboards are
   the server's, viewers send no SQL), and each connection that needs it gets

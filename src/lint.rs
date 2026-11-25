@@ -340,8 +340,6 @@ fn finalize_pending_gate(
     }
 }
 
-/// Like [`check`], but with [`LintOptions`] (e.g. to disable the `design/*`
-/// advisory pass, or set [`LintOptions::stateful_session`]).
 /// #1362: `perf/view-expansion` warns at this many view expansions.
 const VIEW_EXPANSIONS_WARN: usize = 30;
 
@@ -349,11 +347,12 @@ const VIEW_EXPANSIONS_WARN: usize = 30;
 /// views. DuckDB inlines a view at every reference, so a view read three
 /// times by a view read three times by the panel is planned nine times;
 /// the plan grows with the product along the chain and planning starts to
-/// dominate. Counts `Word` tokens naming a `CREATE … VIEW` of the script.
+/// dominate. Counts `Word` tokens naming a `CREATE … VIEW` of the script;
+/// a `-- @materialize` one is a table on a locked server, not counted.
 fn view_expansion_diags(plan: &[sql::Panel]) -> Vec<Diagnostic> {
     use crate::sql::lex::{tokenize, TokKind};
     let mut views: Vec<(String, String)> = Vec::new(); // (name, body)
-    for p in plan.iter().filter(|p| p.setup) {
+    for p in plan.iter().filter(|p| p.setup && !p.materialize) {
         let toks: Vec<_> = tokenize(&p.sql)
             .into_iter()
             .filter(|t| !t.is_trivia())
@@ -425,7 +424,7 @@ fn view_expansion_diags(plan: &[sql::Panel]) -> Vec<Diagnostic> {
                 message: format!(
                     "this panel expands the setup views {} {total} times: DuckDB inlines a view at \
                      every reference, so planning takes most of the time — make a view read \
-                     several times a table (`-- @materialize` above `CREATE TEMP TABLE … AS`) \
+                     several times a table (`-- @materialize` above its `CREATE TEMP VIEW`) \
                      or use `WITH x AS MATERIALIZED (…)` inside it",
                     chain.join(", ")
                 ),
@@ -436,6 +435,8 @@ fn view_expansion_diags(plan: &[sql::Panel]) -> Vec<Diagnostic> {
     out
 }
 
+/// Like [`check`], but with [`LintOptions`] (e.g. to disable the `design/*`
+/// advisory pass, or set [`LintOptions::stateful_session`]).
 pub fn check_opts<F>(script: &str, mut run_query: F, opts: LintOptions) -> Vec<Diagnostic>
 where
     F: FnMut(&str) -> Result<Vec<Map<String, Value>>, String>,
@@ -3816,7 +3817,7 @@ pub fn agent_diags(script: &str) -> Vec<Diagnostic> {
 }
 
 /// `-- @materialize` (#727): only on a setup statement of the form
-/// `CREATE [OR REPLACE] TEMP TABLE t AS <query>` (`materialize/not-table`,
+/// `CREATE [OR REPLACE] TEMP TABLE|VIEW t AS <query>` (`materialize/not-table`,
 /// warning: anywhere else a locked server ignores the line).
 fn materialize_diags(plan: &[sql::Panel]) -> Vec<Diagnostic> {
     plan.iter()
@@ -3827,7 +3828,7 @@ fn materialize_diags(plan: &[sql::Panel]) -> Vec<Diagnostic> {
             stmt: i + 1,
             code: "materialize/not-table",
             message: "-- @materialize only applies to a setup statement \
-                      `CREATE [OR REPLACE] TEMP TABLE <name> AS <query>` — a locked server \
+                      `CREATE [OR REPLACE] TEMP TABLE|VIEW <name> AS <query>` — a locked server \
                       ignores it here"
                 .into(),
             sql: one_line(p.sql.trim()),
@@ -13880,7 +13881,7 @@ mod design_tests {
     }
 
     #[test]
-    fn materialize_diags_flags_anything_but_a_temp_table() {
+    fn materialize_diags_flags_anything_but_a_temp_table_or_view() {
         let codes = |script: &str| -> Vec<(usize, &'static str)> {
             materialize_diags(&sql::plan(script))
                 .iter()
@@ -13889,8 +13890,10 @@ mod design_tests {
         };
         assert!(codes("-- @materialize\nCREATE TEMP TABLE t AS SELECT 1 AS a;").is_empty());
         assert!(codes("CREATE TEMP VIEW v AS SELECT 1 AS a;").is_empty());
+        // #1362: a TEMP view qualifies too
+        assert!(codes("-- @materialize\nCREATE TEMP VIEW v AS SELECT 1 AS a;").is_empty());
         assert_eq!(
-            codes("-- @materialize\nCREATE TEMP VIEW v AS SELECT 1 AS a;"),
+            codes("-- @materialize\nCREATE VIEW v AS SELECT 1 AS a;"),
             [(1, "materialize/not-table")]
         );
         assert_eq!(
@@ -14741,5 +14744,16 @@ mod view_expansion_1362_tests {
         assert!(d[0].message.contains(" c 30 times"), "{}", d[0].message);
         let quiet = format!("{CHAIN}SELECT count(*) AS k ::METRIC FROM a;\nSELECT 'c' AS label, 'a' AS g ::TABLE;\n");
         assert!(view_expansion_diags(&sql::plan(&quiet)).is_empty());
+    }
+
+    /// A `-- @materialize` view is a table on a locked server: not counted.
+    #[test]
+    fn a_materialized_view_is_not_counted() {
+        let chain = CHAIN.replace(
+            "CREATE OR REPLACE TEMP VIEW c",
+            "-- @materialize\nCREATE OR REPLACE TEMP VIEW c",
+        );
+        let script = format!("{chain}SELECT (SELECT count(*) FROM c) AS k, (SELECT sum(n) FROM c) AS s, (SELECT min(g) FROM c) AS m ::TABLE;\n");
+        assert!(view_expansion_diags(&sql::plan(&script)).is_empty());
     }
 }

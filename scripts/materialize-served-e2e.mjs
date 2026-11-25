@@ -6,7 +6,8 @@
 // the server log shows one build. A variable the statement reads builds a
 // new result; one only the panels read reuses it. The result is shared
 // between logins (the setup reads no claim), and a save (options.writeback)
-// builds it once more, reading the saved row.
+// builds it once more, reading the saved row. A `CREATE TEMP VIEW` under the
+// line (#1362) is built the same way, as a table of the view's name.
 //
 //   node scripts/materialize-served-e2e.mjs \
 //       --ext path/to/anofox_visualization.duckdb_extension [--port 8965] [--duckdb duckdb]
@@ -48,6 +49,14 @@ ${Array.from({ length: PANELS }, () => "SELECT string_agg(r::VARCHAR || '@' || l
 const FIRST = 4; // the panels after the setup, the form and the save
 writeFileSync(path.join(dashDir, "mat.sql"), dash("Materialized", "-- @materialize"));
 writeFileSync(path.join(dashDir, "plain.sql"), dash("Plain", "-- not materialized"));
+// #1362: a view under the line; a plain view runs random() at every read.
+const viewDash = (title, mark) => `-- @title ${title}
+${mark}
+CREATE OR REPLACE TEMP VIEW sim AS SELECT i, random() AS r FROM range(3) t(i);
+${Array.from({ length: PANELS }, () => "SELECT string_agg(r::VARCHAR, ',' ORDER BY i) AS s ::TEXT_SMALL FROM sim;").join("\n")}
+`;
+writeFileSync(path.join(dashDir, "matview.sql"), viewDash("Materialized view", "-- @materialize"));
+writeFileSync(path.join(dashDir, "plainview.sql"), viewDash("Plain view", "-- not materialized"));
 const sec = crypto.randomBytes(24).toString("hex");
 const opts = {
   warm: 0,
@@ -96,6 +105,15 @@ try {
 
   const plain = await page("plain", {});
   check(new Set(plain).size > 1, `without @materialize, cold panels each run the statement (${new Set(plain).size} different results)`);
+
+  const viewPage = (d) => Promise.all(Array.from({ length: PANELS }, (_, k) => panel(d, 1 + k)));
+  const pv = await viewPage("plainview");
+  check(new Set(pv).size > 1, `a plain view runs random() at every read (${new Set(pv).size} different results)`);
+  const mv = await viewPage("matview");
+  check(new Set(mv).size === 1, `with @materialize, ${PANELS} panels on a view read one result (${mv[0]})`);
+  await sleep(200);
+  const viewBuilds = (log.match(/materialized statement 0 of 'matview'/g) || []).length;
+  check(viewBuilds === 1, `…built once (${viewBuilds} builds)`);
 
   const a = await page("mat", { n: 3, m: 1 });
   check(new Set(a).size === 1, `with @materialize, ${PANELS} panels at once read one result (${a[0]})`);
