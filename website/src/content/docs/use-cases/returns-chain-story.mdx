@@ -1,0 +1,68 @@
+---
+title: "How many returns will reach our warehouse in the next four weeks?"
+description: "Returns arrive weeks after the sale. A return rate misses sales and storms; a chain of two fitted delays does not. A story dashboard on a synthetic shop with known truth, built with anofox_statistics and anofox_forecast."
+---
+
+import topL from "../../../assets/showcase/returns-chain-story-top-light.webp";
+import topD from "../../../assets/showcase/returns-chain-story-top-dark.webp";
+import truthL from "../../../assets/showcase/returns-chain-story-truth-light.webp";
+import truthD from "../../../assets/showcase/returns-chain-story-truth-dark.webp";
+
+A returns desk has to plan staff and space for the next four weeks. Most planning sheets take the last weeks' return rate, multiply it by sales and shift it by a typical lag. That works in regular weeks. It fails exactly when it matters: after a sale, during a storm, when the mix of buyers changes. **This case forecasts returns the way they happen — a sale, then the customer's request, then the parcel's journey — and checks every forecast against what really arrived.**
+
+It is written as a **story**: one page to read top to bottom (`-- @layout story`), with the numbers in the text computed from the data, charts that step along as you scroll, inputs inside the sentences, and the SQL behind every chart one click away.
+
+<figure class="doc-shot">
+  <img class="lp-light" src={topL.src} alt="The opening of the story: headline, summary, the answer in 30 seconds, and the contents on the right" />
+  <img class="lp-dark" src={topD.src} alt="" />
+  <figcaption>The opening: the answer first, the contents on the right. <a href="../../app/?dashboard=how-many-returns-will-reach-our-warehouse-in-the-next-four-weeks">Open the story ↗</a></figcaption>
+</figure>
+
+## The model: two clocks
+
+Every returned unit runs two clocks one after the other. The **customer's clock**: how long until they ask to return it. The **parcel's clock**: how long the parcel travels once they ask. A storm stops the parcel's clock on a calendar day, for every parcel on the road, whenever it was sold. The forecast spreads each day's sales forward along both clocks and adds them up per day (a *survival convolution*).
+
+Everything the chain needs is fitted on the planning day with **anofox_statistics**:
+
+- **the share returned**, from orders old enough that every return has been asked for — recent orders would make it look too low, which is the shortcut's trap;
+- **the customer's clock**, a Weibull model (`aft_fit_agg`) on those returns;
+- **the parcel's clock**, a Weibull model on the last four months' requests, with parcels still on the road counted as **censored**: we know they have travelled at least this long, and the model uses exactly that.
+
+The shop is synthetic, so the fit can be checked against the truth it was drawn from: shape 1.30 against 1.3 and scale 10.1 days against 10 for the customer's clock, shape 2.21 against 2.2 and scale 6.0 against 6 for the parcel's, return shares 20.0 % and 32.0 % against 20 % and 32 %.
+
+## Against the truth
+
+Three forecasts made on the same day with the same sales plan, scored on the four weeks that followed:
+
+| Method | Off in total | Average miss per day |
+|---|---|---|
+| The chain (fitted) | 0.2 % | 13 parcels — about what chance alone gives |
+| ARIMA on the receipts with the sales of the weeks before (**anofox_forecast**) | 10.1 % | 38 parcels |
+| The shortcut: sales × return rate, shifted | 8.8 % | 143 parcels |
+
+<figure class="doc-shot">
+  <img class="lp-light" src={truthL.src} alt="Parcels per day over the next four weeks: what arrived, the chain with its ranges, the ARIMA and the shortcut" />
+  <img class="lp-dark" src={truthD.src} alt="" />
+  <figcaption>The shortcut puts the May sale's returns into one peak and then runs short while the long tail is still arriving; the chain stays on what arrived.</figcaption>
+</figure>
+
+The ARIMA sees the sale in its inputs, but it has to learn from one year of receipts what a sale does — and a year holds only two sales. The chain does not learn that from the receipts at all: it knows how each unit comes back. (The ARIMA's numbers above are the browser's; the native build picks another ARIMA model and lands at +16 %, 58 parcels a day. The page computes its text from the data, so it always matches what it shows.)
+
+## What if
+
+The chain answers planning questions without refitting: change the input, keep the curves. A **storm next week** cuts about 890 parcels from its three days and delivers them right after — the four-week total stays, the work moves. **Cancelling the June sale** takes about 1,350 parcels out of the last two weeks; the first two weeks are the May sale's returns, already on their way.
+
+## Limits
+
+The shop is synthetic: its returns follow exactly the two clocks the chain assumes, which flatters the chain. Real returns need the share returned per product group, and the delay curves drift with the season and with policies; refit them regularly and check them against what arrived. When sales are steady all year, the shortcut is good enough — the chain earns its keep where sales are not.
+
+## Build your own story
+
+- `-- @layout story` turns a dashboard's tabs into numbered parts of one article; `-- @group`, `-- @title` and `-- @description` become its opening.
+- `{{column}}` puts a computed number into a sentence; `{{@name}}` puts the input of variable `name` there.
+- `::STORY` captions on a chart become text cards that step the chart as the reader scrolls.
+- `-- @term <term>: <definition>` explains a word on hover.
+- `'end'::LEGEND` names each line at its end instead of a legend.
+- The **⭳ HTML** export keeps all of it offline, including every button group and small dropdown.
+
+See the [reference](../../reference/) for the details.
