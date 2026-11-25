@@ -59,3 +59,42 @@ fn a_band_takes_its_series_mapped_colour() {
         "the band is the chain's colour: {ribbon}"
     );
 }
+
+/// #1374: `'end'::LEGEND` names each line at its end (ggplot-rs
+/// `direct_labels`) instead of a legend: the label is drawn in its line's
+/// colour.
+#[test]
+fn end_legend_names_each_line_at_its_end() {
+    let mut x = Vec::new();
+    let mut cat = Vec::new();
+    let mut y = Vec::new();
+    for (series, base) in [("Chain", 30.0), ("Shortcut", 20.0)] {
+        for i in 0..6 {
+            x.push(Value::Float(i as f64));
+            cat.push(Value::Str(series.into()));
+            y.push(Value::Float(base + i as f64));
+        }
+    }
+    let n = x.len();
+    let cols = vec![
+        Column::new("day", Role::X, x),
+        Column::new("method", Role::Category, cat),
+        Column::new("parcels", Role::Value(Kind::Line), y),
+        Column::new(
+            "colors",
+            Role::GaugeColors,
+            vec![Value::Str("Chain:#2563eb; Shortcut:#d97706".into()); n],
+        ),
+        Column::new("legend", Role::Legend, vec![Value::Str("end".into()); n]),
+    ];
+    let r = render_with_warnings(&cols, 480, 320, &RenderOptions::default()).expect("renders");
+    let label = r
+        .svg
+        .split("<text")
+        .find(|t| t.contains(">Chain<"))
+        .expect("a label for Chain");
+    assert!(
+        label.to_ascii_lowercase().contains("#2563eb"),
+        "drawn in the line's colour: {label}"
+    );
+}

@@ -327,7 +327,7 @@ pub static REGISTRY: &[RoleSpec] = &[
     e("LINESTYLE", &["LINE_STYLE"], R::LineStyle, "modifier", true,
       "per row, by ::CATEGORY: 'flow' = moving dashes (a forecast, \"predicted\"; still dashes in static output), 'dashed', 'solid'"),
     e("LEGEND", &[], R::Legend, "modifier", true,
-      "a chart's legend / colourbar: 'none' hides it, or 'top'/'right'/'bottom'/'left' moves it; without it, unchanged"),
+      "a chart's legend / colourbar: 'none' hides it, 'top'/'right'/'bottom'/'left' moves it, 'end' names each line at its end instead; without it, unchanged"),
     // ── KPIs & text ────────────────────────────────────────────────────────
     e("METRIC", &["KPI", "BIGNUMBER"], R::Metric(MetricFmt::Plain), "kpi", true,
       "big-number KPI (add ::LABEL for a caption)"),
