@@ -16267,14 +16267,17 @@ function storyChrome(dash, on, sql) {
   dash._storySpy = new IntersectionObserver(
     (entries) => {
       for (const e of entries) e.isIntersecting ? seen.add(e.target) : seen.delete(e.target);
-      const cur = panes.findIndex((p) => seen.has(p));
-      if (cur < 0) return;
+      let cur = panes.findIndex((p) => seen.has(p));
+      // above the first part (back at the opening) nothing is marked
+      if (cur < 0 && panes[0] && panes[0].getBoundingClientRect().top > innerHeight * 0.2) cur = -1;
+      else if (cur < 0) return;
       // the part in view is marked; the parts above it read as done
       btns.forEach((b, i) => {
         b.classList.toggle("active", i === cur);
         b.classList.toggle("read", i < cur);
       });
       // a bar that scrolls sideways (phones) keeps the part in view visible
+      if (cur < 0) return;
       const bar = btns[cur].parentElement;
       if (bar.scrollWidth > bar.clientWidth + 1)
         bar.scrollTo({ left: btns[cur].offsetLeft - (bar.clientWidth - btns[cur].offsetWidth) / 2, behavior: "auto" });

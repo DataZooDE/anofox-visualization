@@ -87,6 +87,7 @@ export default defineConfig({
           { label: "Which lever lowers scrap?", slug: "use-cases/production-scrap" },
           { label: "Can one model forecast every item?", slug: "use-cases/global-forecast" },
           { label: "Does one model beat the M5 benchmarks?", slug: "use-cases/m5-daily-forecast" },
+          { label: "How many returns will reach the warehouse?", slug: "use-cases/returns-chain-story" },
         ] },
         { label: "Build", items: [
           { label: "The annotation model", slug: "build" },
