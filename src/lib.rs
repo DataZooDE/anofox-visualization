@@ -2844,7 +2844,7 @@ pub const HOVER_FOCUS_MODES: &[&str] = &["series", "none"];
 
 /// The `::LEGEND` values — `'none'` plus every [`ggplot_rs::theme::LegendPosition`]
 /// variant that is a side (not `Inside`, which `::LEGEND` has no syntax for).
-pub const LEGEND_POSITIONS: &[&str] = &["none", "top", "right", "bottom", "left"];
+pub const LEGEND_POSITIONS: &[&str] = &["none", "top", "right", "bottom", "left", "end"];
 
 /// A panel's motion directives, as root attributes for the browser (static
 /// output ignores them): `data-animate` (`::ANIMATE`) and, for `'reveal'`,
@@ -3454,6 +3454,8 @@ pub(crate) fn legend_position_of(cols: &[Column]) -> Option<ggplot_rs::theme::Le
         "right" => Some(L::Right),
         "bottom" => Some(L::Bottom),
         "left" => Some(L::Left),
+        // #1374: each line named at its end — the right band, see legend_at_ends
+        "end" => Some(L::Right),
         _ => None,
     }
 }
@@ -5639,6 +5641,11 @@ fn cartesian(
         },
         (_, pos) => plot.legend_position(pos.unwrap_or(ggplot_rs::theme::LegendPosition::Top)),
     };
+    // `'end'::LEGEND` (#1374): each line named at its end instead of a legend
+    // (ggplot-rs `direct_labels`, which keeps the legend when nothing is a line)
+    if role_str(cols, Role::Legend).is_some_and(|v| v.eq_ignore_ascii_case("end")) {
+        plot = plot.direct_labels();
+    }
     if let Some(t) = &title {
         plot = plot.title(t);
     }

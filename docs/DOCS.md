@@ -186,7 +186,7 @@ terminal.
 | `::POINTS` | `::MARKERS` | modifier | line/area point markers: 'auto' (default) hides them on a dense series (x positions under 3 px apart) and keeps them as hover/click targets, 'none' always hides them, 'always' always draws them |
 | `::NORTH_ARROW` | `::NORTH`, `::NORTHARROW` | modifier | a map's north arrow, pointing to true north: 'print' (only in print, PNG, PDF and --svg output; hidden on screen) or 'always' |
 | `::LINESTYLE` | `::LINE_STYLE` | modifier | per row, by ::CATEGORY: 'flow' = moving dashes (a forecast, "predicted"; still dashes in static output), 'dashed', 'solid' |
-| `::LEGEND` |  | modifier | a chart's legend / colourbar: 'none' hides it, or 'top'/'right'/'bottom'/'left' moves it; without it, unchanged |
+| `::LEGEND` |  | modifier | a chart's legend / colourbar: 'none' hides it, 'top'/'right'/'bottom'/'left' moves it, 'end' names each line at its end instead (labels pushed apart, in the line's colour); without it, unchanged |
 | `::METRIC` | `::KPI`, `::BIGNUMBER` | kpi | big-number KPI (add ::LABEL for a caption) |
 | `::MONEY` | `::DOLLAR`, `::CURRENCY` | kpi | currency KPI / table column format |
 | `::PERCENT` | `::PCT` | kpi | percent KPI / table column format; the value is in percent (12.5 → 12.5%; a fraction × 100) |

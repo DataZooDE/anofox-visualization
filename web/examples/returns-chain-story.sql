@@ -303,7 +303,7 @@ The **customer''s clock**: how long until they ask to return. Most ask within th
 > Two clocks, one after the other: the customer''s, then the parcel''s.'::MARKDOWN,
        rw_n.*, round(100 * d.share) AS share_pct, round(d.units * d.share) AS back FROM rw_n, rw_day d;
 SELECT k::XAXIS, clock::CATEGORY, n AS "Returns per day" ::LINECHART, 'Customer asks:#0891b2; Parcel arrives:#2563eb' ::COLORS,
-       'none' ::POINTS, 'Of the units sold on that day: returns per day after the sale' ::TITLE, 'days after the sale' ::XTITLE
+       'none' ::POINTS, 'end' ::LEGEND, 'Of the units sold on that day: returns per day after the sale' ::TITLE, 'days after the sale' ::XTITLE
 FROM (SELECT k, 'Customer asks' AS clock, d.units * d.share * ask AS n FROM rw_curve, rw_day d
       UNION ALL SELECT k, 'Parcel arrives', d.units * d.share * arrive FROM rw_curve, rw_day d)
 ORDER BY clock, k;
@@ -341,7 +341,7 @@ SELECT 'Against the truth'::TAB;
 SELECT 'Because the shop is synthetic, the next four weeks have already happened. Three forecasts were made on {{today:date}}, all with the same sales plan: the shortcut, the chain, and a standard time-series model — an ARIMA on the daily receipts that is given the sales of the one to three weeks before each day. The grey line is what really arrived.'::MARKDOWN, * FROM rw_n;
 SELECT m.day::XAXIS, m.method::CATEGORY, m.parcels AS "Parcels per day" ::LINECHART,
        m.lo90::BAND_LOWER, m.hi90::BAND_UPPER, m.lo50::BAND_LOWER, m.hi50::BAND_UPPER,
-       'What arrived:neutral; Chain:#2563eb; ARIMA:#7c3aed; Shortcut:#d97706' ::COLORS, 'none' ::POINTS, 'Parcels per day, next four weeks: forecasts and what arrived' ::TITLE,
+       'What arrived:neutral; Chain:#2563eb; ARIMA:#7c3aed; Shortcut:#d97706' ::COLORS, 'none' ::POINTS, 'end' ::LEGEND, 'Parcels per day, next four weeks: forecasts and what arrived' ::TITLE,
        p.start_day::XBAND_FROM, p.end_day::XBAND_TO, p.promo::XBAND_LABEL,
        CASE WHEN m.day = (SELECT min(day) FROM rw_fc) THEN m.caption END ::STORY, 'series' ::STORY_BY
 FROM (SELECT day, 1 AS ord, 'What arrived' AS method, actual AS parcels, NULL::DOUBLE AS lo90, NULL::DOUBLE AS hi90, NULL::DOUBLE AS lo50, NULL::DOUBLE AS hi50,
@@ -370,7 +370,7 @@ SELECT 'What if'::TAB;
 SELECT 'The chain answers planning questions without refitting: change the input, keep the curves. Two questions the planner gets every week: what does a storm next week do to the desk, and what happens if the June sale is cancelled?'::MARKDOWN;
 SELECT scenario::BUTTONS FROM (VALUES ('Storm next week'), ('No June sale')) t(scenario);
 SELECT m.day::XAXIS, m.line::CATEGORY, m.parcels AS "Parcels per day" ::LINECHART,
-       'Plan as it is:#2563eb; With the change:warn' ::COLORS, 'none' ::POINTS,
+       'Plan as it is:#2563eb; With the change:warn' ::COLORS, 'none' ::POINTS, 'end' ::LEGEND,
        'Parcels per day: the plan against the change' ::TITLE,
        s.start_day::XBAND_FROM, s.end_day::XBAND_TO, s.storm::XBAND_LABEL
 FROM (SELECT day, 'Plan as it is' AS line, chain AS parcels FROM rw_fc

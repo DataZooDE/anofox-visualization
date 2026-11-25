@@ -6401,7 +6401,7 @@ fn motion_diags(
                 out.push((
                     "legend/bad-value",
                     format!(
-                        "::LEGEND `{v}` is not 'none', 'top', 'right', 'bottom' or 'left' — \
+                        "::LEGEND `{v}` is not 'none', 'top', 'right', 'bottom', 'left' or 'end' — \
                          the legend is drawn where it always has"
                     ),
                 ));
