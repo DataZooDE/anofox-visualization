@@ -213,6 +213,37 @@ ${Array.from({ length: 12 }, (_, i) => `SELECT 'Filler paragraph ${i} so the pag
   await phone.close();
 }
 
+// (a4) the HTML export of a story (#1368): it stays a story (every part
+// shown, contents scroll), and a few-valued input keeps working offline
+{
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 }, reducedMotion: "reduce", acceptDownloads: true });
+  const page = await ctx.newPage();
+  await page.goto(`${base}?mode=view#sql=${b64(`-- @title Returns\n-- @layout story\n${BODY}`)}`);
+  await page.waitForFunction(() => /\d+ panels?/.test(document.getElementById("status")?.textContent || "") && !document.body.classList.contains("loading"), null, { timeout: 120000 });
+  const [dl] = await Promise.all([page.waitForEvent("download", { timeout: 180000 }), page.click("#dlhtml")]);
+  const html = await (await import("fs")).promises.readFile(await dl.path(), "utf8");
+  const off = await ctx.newPage();
+  const errs = [];
+  off.on("pageerror", (e) => errs.push(String(e)));
+  await off.setContent(html, { waitUntil: "load" });
+  await off.waitForTimeout(500);
+  const s0 = await off.evaluate(() => ({
+    story: document.querySelector(".dash")?.classList.contains("dp-story"),
+    shown: [...document.querySelectorAll(".dash > .tabwrap > .tabpane")].filter((p) => getComputedStyle(p).display !== "none").length,
+    vars: document.querySelector(".dp-variants")?.dataset.vars,
+    chart: document.querySelector('.dash .tabpane .panel .panel-svg svg[aria-label], .dash .tabpane .panel .panel-svg svg')?.outerHTML.length,
+  }));
+  check(s0.story && s0.shown === 2, `(a4) the export is still a story, every part shown (${JSON.stringify(s0)})`);
+  check(s0.vars === "channel", "(a4) the 2-value dropdown is kept live (channel)");
+  const bar = () => off.evaluate(() => [...document.querySelectorAll(".dash .panel")].find((p) => p.querySelector("svg") && p.closest("#part-2, .tabpane:nth-child(2)"))?.querySelector("svg")?.outerHTML);
+  const before = await bar();
+  await off.evaluate(() => { const s = document.querySelector('[data-varname="channel"] select'); s.value = "store"; s.dispatchEvent(new Event("change", { bubbles: true })); });
+  await off.waitForTimeout(200);
+  check(before && (await bar()) !== before, "(a4) …and changing it offline swaps in that value's chart");
+  check(!errs.length, "(a4) no errors in the export: " + errs.join(" | "));
+  await ctx.close();
+}
+
 // (b) without the header: tabs as before
 {
   const { page, errs } = await open(`-- @title Returns\n${BODY}`);

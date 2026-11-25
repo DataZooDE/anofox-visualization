@@ -15339,7 +15339,11 @@ function makeControl(meta, bar) {
     wrap.appendChild(mk(meta.varnames[1]));
     return finalizeControl(wrap, bar);
   }
-  if (meta.kind === "BUTTONS") return finalizeControl(mkButtons(meta), bar);
+  if (meta.kind === "BUTTONS") {
+    const el = mkButtons(meta);
+    el._dpMeta = meta; // #1368: the export enumerates a few-valued input
+    return finalizeControl(el, bar);
+  }
   if (meta.kind === "TOGGLE") {
     // A native checkbox with the switch role: Space toggles it, screen readers
     // announce on/off; the caption is its label.
@@ -15797,6 +15801,7 @@ function mkButtons(meta) {
     const b = document.createElement("button");
     b.type = "button";
     b.textContent = optionLabel(meta, k);
+    b.dataset.value = String(o); // #1368: an export switches by it
     b.setAttribute("role", "radio");
     const on = o === dpVars[meta.varname];
     b.setAttribute("aria-checked", on ? "true" : "false");
@@ -20856,6 +20861,40 @@ async function downloadHtmlInner() {
     base = sheet ? sheetText(sheet) : "";
   }
   const tokens = document.getElementById("ax-theme")?.textContent || "";
+  const { snap, math } = await exportSnapshot();
+  // #1368: an input with a few values keeps working offline — each value's
+  // changed panels, pre-rendered, as templates the export's script swaps in
+  const variants = await exportInputVariants(snap);
+  if (variants) snap.appendChild(variants);
+  // a story keeps its layout (#1367)
+  const story = document.querySelector(".dash")?.classList.contains("dp-story");
+  const content = snap.innerHTML;
+  const v = dpTheme.set && dpTheme.set[dpTheme.variant];
+  const b = (v && v.brand) || {};
+  const title = b.title ? b.title + (b.title_suffix || "") : "anofox-visualization dashboard";
+  const fav = b.favicon && safeUrl(b.favicon, { image: true });
+  const html =
+    `<!doctype html><html data-ax-variant="${dpTheme.variant}"><head><meta charset="utf-8"><title>${escapeHtml(title)}</title>` +
+    (fav ? `<link rel="icon" href="${escapeHtml(fav)}">` : "") +
+    // #523: print-only — flatten the offline stepper back to every step at
+    // once, numbered via `data-dp-print` (set above), the same way the old
+    // full-export flatten read on screen. Scoped to this exported copy (not
+    // theme-base.css's shared print rule), so the *live* page keeps
+    // printing just its current step, same as a ::TAB/::VIEW.
+    `<style>${tokens}\n${base}\nbody{margin:0}\n@media print{.dp-steppane{display:grid !important}.dp-step-title{font-size:0}.dp-step-title::before{content:attr(data-dp-print);display:block;font:700 1.1rem/1.3 var(--ax-font-display);letter-spacing:-.01em;color:var(--ax-heading)}}</style>` +
+    (math ? `<style>${math}</style>` : "") +
+    `</head><body class="embed">` +
+    `<div class="dash${story ? " dp-story" : ""}">${content}</div><div id="dp-tip" class="dp-tip"></div>` +
+    `<script>${SNAPSHOT_JS}<\/script><script>${snapshotMotion()}<\/script>` +
+    (variants ? `<script>${SNAPSHOT_INPUTS_JS}<\/script>` : "") +
+    (story ? `<script>${SNAPSHOT_STORY_JS}<\/script>` : "") +
+    `</body></html>`;
+  download(new Blob([html], { type: "text/html" }), "dashboard.html");
+}
+
+// The live dashboard, cleaned up for the export: no tools, no editing, every
+// frame and step kept for the offline script (see downloadHtmlInner).
+async function exportSnapshot() {
   await typesetMath(document.querySelector(".dash"));
   // A snapshot has no live tables or chart tools: drop their search / filter /
   // pager controls and the panel toolboxes.
@@ -21039,25 +21078,7 @@ async function downloadHtmlInner() {
     (img) => !/^data:/i.test(img.getAttribute("src") || "")
   );
   await Promise.all(toInline.map((img) => inlineExportedImage(img)));
-  const content = snap.innerHTML;
-  const v = dpTheme.set && dpTheme.set[dpTheme.variant];
-  const b = (v && v.brand) || {};
-  const title = b.title ? b.title + (b.title_suffix || "") : "anofox-visualization dashboard";
-  const fav = b.favicon && safeUrl(b.favicon, { image: true });
-  const html =
-    `<!doctype html><html data-ax-variant="${dpTheme.variant}"><head><meta charset="utf-8"><title>${escapeHtml(title)}</title>` +
-    (fav ? `<link rel="icon" href="${escapeHtml(fav)}">` : "") +
-    // #523: print-only — flatten the offline stepper back to every step at
-    // once, numbered via `data-dp-print` (set above), the same way the old
-    // full-export flatten read on screen. Scoped to this exported copy (not
-    // theme-base.css's shared print rule), so the *live* page keeps
-    // printing just its current step, same as a ::TAB/::VIEW.
-    `<style>${tokens}\n${base}\nbody{margin:0}\n@media print{.dp-steppane{display:grid !important}.dp-step-title{font-size:0}.dp-step-title::before{content:attr(data-dp-print);display:block;font:700 1.1rem/1.3 var(--ax-font-display);letter-spacing:-.01em;color:var(--ax-heading)}}</style>` +
-    (math ? `<style>${math}</style>` : "") +
-    `</head><body class="embed">` +
-    `<div class="dash">${content}</div><div id="dp-tip" class="dp-tip"></div>` +
-    `<script>${SNAPSHOT_JS}<\/script><script>${snapshotMotion()}<\/script></body></html>`;
-  download(new Blob([html], { type: "text/html" }), "dashboard.html");
+  return { snap, math };
 }
 
 // KaTeX's stylesheet with its fonts inlined (woff2 data: URLs), so an
@@ -21079,13 +21100,144 @@ async function katexCssInline() {
   }
 }
 
+// #1368: each few-valued input (::BUTTONS, or a plain ::DROPDOWN with at
+// most EXPORT_INPUT_MAX options) keeps working in the export. For every other
+// value, the dashboard runs once more here (the author's browser, which has
+// the engine), the cleaned copy is built (exportSnapshot), and each panel
+// that differs from the default copy is kept as a template keyed by the
+// variable, the value and the panel's statement; the default panels too, so
+// the export can switch back. Inputs vary one at a time, the others at their
+// value of the moment. Capped by EXPORT_INPUT_BUDGET bytes; over it the input
+// is left as it is (frozen) and a console note says so. Returns the
+// templates' container, or null.
+const EXPORT_INPUT_MAX = 8;
+const EXPORT_INPUT_BUDGET = 4 * 1024 * 1024;
+async function exportInputVariants(baseSnap) {
+  const metas = [];
+  for (const el of document.querySelectorAll(".dash [data-varname]")) {
+    let m = el._dpMeta;
+    if (!m) {
+      const sel = el.querySelector(":scope > select:not([multiple])");
+      if (sel && el.closest(".dash") && !el.querySelector(".dp-dd"))
+        m = { varname: el.dataset.varname, options: [...sel.options].map((o) => o.value) };
+    }
+    if (!m || !m.varname || !Array.isArray(m.options) || m.options.length < 2 || m.options.length > EXPORT_INPUT_MAX) continue;
+    if (!metas.some((x) => x.varname === m.varname)) metas.push(m);
+  }
+  if (!metas.length) return null;
+  const byStmt = (root) => new Map([...root.querySelectorAll(".panel[data-stmt]")].map((p) => [p.dataset.stmt, p]));
+  const base = byStmt(baseSnap);
+  const box = document.createElement("div");
+  box.className = "dp-variants";
+  box.hidden = true;
+  let bytes = 0;
+  for (const m of metas) {
+    const orig = dpVars[m.varname];
+    const keep = [];
+    let size = 0;
+    const changed = new Set();
+    for (const o of m.options) {
+      if (String(o) === String(orig)) continue;
+      dpVars[m.varname] = o;
+      await run(false);
+      await lazyFlushAll();
+      const { snap } = await exportSnapshot();
+      for (const [stmt, p] of byStmt(snap)) {
+        const b = base.get(stmt);
+        if (b && b.outerHTML === p.outerHTML) continue;
+        changed.add(stmt);
+        keep.push([o, stmt, p.outerHTML]);
+        size += p.outerHTML.length;
+      }
+    }
+    dpVars[m.varname] = orig;
+    await run(false);
+    await lazyFlushAll();
+    for (const stmt of changed) {
+      const html = base.get(stmt)?.outerHTML;
+      if (html) (keep.push([orig, stmt, html]), (size += html.length));
+    }
+    if (bytes + size > EXPORT_INPUT_BUDGET) {
+      console.warn(`export: the input '${m.varname}' would add ${Math.round(size / 1024)} KB — left as it is`);
+      continue;
+    }
+    bytes += size;
+    for (const [o, stmt, html] of keep) {
+      const t = document.createElement("template");
+      t.dataset.var = m.varname;
+      t.dataset.val = String(o);
+      t.dataset.stmt = stmt;
+      t.innerHTML = html;
+      box.appendChild(t);
+    }
+    box.dataset.vars = [box.dataset.vars, m.varname].filter(Boolean).join(",");
+  }
+  return box.children.length ? box : null;
+}
+// The export's input switch (#1368): a ::BUTTONS click or a <select> change
+// swaps in that value's pre-rendered panels (and the buttons' state).
+const SNAPSHOT_INPUTS_JS = `(function(){
+  var box=document.querySelector('.dp-variants'); if(!box)return;
+  function show(name,val){
+    [].forEach.call(box.querySelectorAll('template'),function(t){
+      if(t.dataset.var!==name||t.dataset.val!==val)return;
+      var cur=document.querySelector('.dash .panel[data-stmt="'+t.dataset.stmt+'"]');
+      if(cur)cur.replaceWith(t.content.firstElementChild.cloneNode(true));
+    });
+    if(window.__dpStoryRefresh)window.__dpStoryRefresh();
+  }
+  var names=(box.dataset.vars||'').split(',');
+  function ctl(el){var c=el.closest('[data-varname]');return c&&names.indexOf(c.dataset.varname)>=0?c:null;}
+  document.addEventListener('click',function(e){
+    var b=e.target.closest('[role="radio"]'); var c=b&&ctl(b); if(!c)return;
+    var name=c.dataset.varname, val=b.getAttribute('data-value');
+    if(val===null)return;
+    show(name,val);
+    // the swapped panels may hold this input again (an input inside a sentence): mark the pick everywhere
+    [].forEach.call(document.querySelectorAll('[data-varname="'+name+'"] [role="radio"]'),function(o){o.setAttribute('aria-checked',o.getAttribute('data-value')===val?'true':'false');});
+  });
+  document.addEventListener('change',function(e){var c=e.target.matches&&e.target.matches('select')&&ctl(e.target);if(c)show(c.dataset.varname,e.target.value);});
+})();`;
+// A story's reading aids offline (#1367, #1376–#1381): the contents scroll
+// to their part and mark the one in view, the progress bar, #part-N links,
+// the terms' popover, and ::STORY charts stepping while scrolling.
+const SNAPSHOT_STORY_JS = `(function(){
+  var dash=document.querySelector('.dash.dp-story'); if(!dash)return;
+  var btns=[].slice.call(dash.querySelectorAll(':scope > .tabbar > .tab-btn'));
+  var panes=[].slice.call(dash.querySelectorAll(':scope > .tabwrap > .tabpane'));
+  panes.forEach(function(p){p.style.display='';});
+  btns.forEach(function(b,i){b.onclick=function(){panes[i]&&panes[i].scrollIntoView({block:'start'});};});
+  var bar=dash.querySelector('.story-progress');
+  function onScroll(){
+    var r=dash.getBoundingClientRect(); if(bar)bar.style.setProperty('--p',Math.min(1,Math.max(0,-r.top/Math.max(1,r.height-innerHeight))).toFixed(4));
+    var cur=-1; panes.forEach(function(p,i){if(p.getBoundingClientRect().top<innerHeight*0.3)cur=i;});
+    btns.forEach(function(b,i){b.classList.toggle('active',i===cur);b.classList.toggle('read',i<cur);});
+    [].forEach.call(dash.querySelectorAll('.story-scrolly'),function(box){
+      var p=box.querySelector(':scope > .panel'), cards=box.querySelector(':scope > .story-steps'); if(!p||!cards)return;
+      var below=p.getBoundingClientRect().bottom, line=Math.min(innerHeight*0.85,Math.max(below,0)+(innerHeight-Math.max(below,0))*0.35);
+      var on=null; [].forEach.call(cards.children,function(c){if(c.getBoundingClientRect().top<line)on=c;});
+      [].forEach.call(cards.children,function(c){c.classList.toggle('active',c===on);});
+      var k=on?+on.dataset.step:0; if(p._story&&p._story.step()!==k)p._story.show(k);
+    });
+  }
+  addEventListener('scroll',onScroll,{passive:true}); window.__dpStoryRefresh=onScroll; setTimeout(onScroll,50);
+  document.addEventListener('click',function(e){
+    var a=e.target.closest&&e.target.closest('a[href^="#part-"]'); if(!a)return;
+    var t=document.getElementById(a.getAttribute('href').slice(1)); if(t){e.preventDefault();t.scrollIntoView({block:'start'});}
+  });
+  var pop=document.createElement('div'); pop.className='story-term-pop'; pop.hidden=true; document.body.appendChild(pop);
+  function showTerm(el){pop.textContent=''; var b=document.createElement('strong'); b.textContent=el.dataset.term; pop.appendChild(b); pop.appendChild(document.createTextNode(' — '+el.dataset.def)); var r=el.getBoundingClientRect(), w=Math.min(320,innerWidth-24); pop.style.width=w+'px'; pop.style.left=Math.max(12,Math.min(innerWidth-w-12,r.left))+'px'; pop.style.top=(r.bottom+6)+'px'; pop.hidden=false;}
+  ['mouseover','focusin'].forEach(function(ev){document.addEventListener(ev,function(e){var t=e.target.closest&&e.target.closest('.story-term');if(t)showTerm(t);});});
+  ['mouseout','focusout'].forEach(function(ev){document.addEventListener(ev,function(e){if(e.target.closest&&e.target.closest('.story-term'))pop.hidden=true;});});
+})();`;
+
 // The export's chart motion: web/anim.js's kit (its own source, so there is
 // one implementation) replaying each chart's entrance and rebuilding its
 // ::STORY stepper at the overview.
 function snapshotMotion() {
   return `(function(){var K=(${animKit})(window);
   document.querySelectorAll('.panel svg[data-anim]').forEach(function(s){K.enter(s,s.getAttribute('data-anim'));});
-  document.querySelectorAll('.panel-svg > svg[data-story]').forEach(function(s){K.story(s.closest('.panel'),s);});
+  document.querySelectorAll('.panel-svg > svg[data-story]').forEach(function(s){var p=s.closest('.panel');p._story=K.story(p,s);});
   // M2f-B (#149): a time map within the embed budget gets every frame as a
   // sibling frame-indexed TEMPLATE element (downloadHtml(); review of #602
   // N5: not spelled out literally here — this comment ships inside the
@@ -21216,11 +21368,13 @@ const SNAPSHOT_JS = `(function(){
       });
     });
   }
-  document.querySelectorAll('.tabbar').forEach(function(bar){
+  // a story's (#1367) tab bar is its contents: SNAPSHOT_STORY_JS wires it
+  var storyPage=!!document.querySelector('.dash.dp-story');
+  if(!storyPage)document.querySelectorAll('.tabbar').forEach(function(bar){
     var wrap=bar.nextElementSibling;
     if(wrap&&wrap.classList.contains('tabwrap'))wireTabs(bar,wrap,'.tabpane');
   });
-  document.querySelectorAll('.subtabbar').forEach(function(bar){
+  if(!storyPage)document.querySelectorAll('.subtabbar').forEach(function(bar){
     var wrap=bar.nextElementSibling;
     if(wrap&&wrap.classList.contains('subtabwrap'))wireTabs(bar,wrap,'.subtabpane');
   });
