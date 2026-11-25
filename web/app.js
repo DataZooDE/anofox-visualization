@@ -16022,6 +16022,10 @@ function storyChrome(dash, on, sql) {
   add("p", "story-meta", [parts > 1 ? `${parts} parts` : "", words > 150 ? `${Math.max(1, Math.round(words / 220))} min read` : ""].filter(Boolean).join(" · "));
   if (!hero.children.length) return;
   dash.querySelector(":scope > .grid")?.before(hero);
+  // the contents stay in view below the app's own bar, when it stays too
+  const bar = document.querySelector("body > header");
+  const fixed = bar && /^(sticky|fixed)$/.test(getComputedStyle(bar).position);
+  dash.style.setProperty("--story-top", `${fixed ? Math.round(bar.getBoundingClientRect().height) : 0}px`);
   const btns = [...dash.querySelectorAll(":scope > .tabbar > .tab-btn")];
   const panes = [...dash.querySelectorAll(":scope > .tabwrap > .tabpane")];
   if (!btns.length || typeof IntersectionObserver !== "function") return;

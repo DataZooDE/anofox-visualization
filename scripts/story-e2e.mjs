@@ -109,6 +109,31 @@ const state = (page) =>
   await page.close();
 }
 
+// (a2) a wide screen: the contents are a column on the right that stays in
+// view while the article scrolls
+{
+  const page = await browser.newPage({ viewport: { width: 1600, height: 800 }, reducedMotion: "reduce" });
+  await page.goto(`${base}?mode=view#sql=${b64(`-- @title Returns\n-- @layout story\n${BODY}`)}`);
+  await page.waitForFunction(
+    () => /\d+ panels?/.test(document.getElementById("status")?.textContent || "") && !document.body.classList.contains("loading"),
+    null,
+    { timeout: 120000 }
+  );
+  const rail = async () =>
+    page.evaluate(() => {
+      const bar = document.querySelector(".dash > .tabbar").getBoundingClientRect();
+      const text = document.querySelector(".dash > .tabwrap").getBoundingClientRect();
+      return { right: bar.left >= text.right, top: Math.round(bar.top), visible: bar.bottom > 0 && bar.top < innerHeight };
+    });
+  const r0 = await rail();
+  check(r0.right, "(a2) the contents sit right of the article");
+  await page.evaluate(() => document.querySelectorAll(".dash > .tabbar > .tab-btn")[1].click());
+  await page.waitForTimeout(400);
+  const r1 = await rail();
+  check(r1.visible, `(a2) …and stay in view after scrolling (top ${r0.top} → ${r1.top})`);
+  await page.close();
+}
+
 // (b) without the header: tabs as before
 {
   const { page, errs } = await open(`-- @title Returns\n${BODY}`);
