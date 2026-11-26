@@ -1355,6 +1355,20 @@ jobs:
         timeout-minutes: 10
         run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/story-served-e2e.mjs --ext "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
 
+      # scripts/export-served-e2e.mjs (#1391): what a viewer can export from
+      # the locked server (a forced ⤓ HTML, /api/export SVG/CSV/JSON) holds
+      # their rows only under a row policy, no SQL and no secret.
+      - name: Exports on a locked server leak nothing (#1391)
+        timeout-minutes: 5
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/export-served-e2e.mjs --ext "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
+
+      # scripts/session-end-served-e2e.mjs (#1391): an expired page session is
+      # refused even for an answer the server holds; the next viewer on the
+      # warm server gets only their own rows.
+      - name: Session end on a locked server (#1391)
+        timeout-minutes: 5
+        run: NODE_PATH="$PWD/tests/web/node_modules" node scripts/session-end-served-e2e.mjs --ext "$RUNNER_TEMP/anofox_visualization.duckdb_extension"
+
       # scripts/notes-served-e2e.mjs (#889): notes on charts (options.notes) —
       # a writer adds one from the chart tools, every viewer sees it, only the
       # author or a moderator deletes it, the cross-site gate holds.
