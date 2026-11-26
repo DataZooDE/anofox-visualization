@@ -209,7 +209,35 @@ fn http(
     s.write_all(h.as_bytes()).unwrap();
     let mut out = String::new();
     let _ = s.read_to_string(&mut out);
-    out
+    dechunk(out)
+}
+
+/// The response with a chunked body joined up, so a check on the page's text
+/// doesn't depend on where the server split it (a chunk-size line can land in
+/// the middle of a phrase).
+fn dechunk(raw: String) -> String {
+    let Some((head, rest)) = raw.split_once("\r\n\r\n") else {
+        return raw;
+    };
+    if !head
+        .to_ascii_lowercase()
+        .contains("transfer-encoding: chunked")
+    {
+        return raw;
+    }
+    // bytes: a chunk may end inside a character
+    let (mut rest, mut body) = (rest.as_bytes(), Vec::new());
+    while let Some(eol) = rest.windows(2).position(|w| w == b"\r\n") {
+        let size = String::from_utf8_lossy(&rest[..eol]);
+        let n = usize::from_str_radix(size.trim(), 16).unwrap_or(0);
+        let data = &rest[eol + 2..];
+        if n == 0 || data.len() < n {
+            break;
+        }
+        body.extend_from_slice(&data[..n]);
+        rest = data[n..].strip_prefix(b"\r\n").unwrap_or(&data[n..]);
+    }
+    format!("{head}\r\n\r\n{}", String::from_utf8_lossy(&body))
 }
 
 fn enc(s: &str) -> String {
