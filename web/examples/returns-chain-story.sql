@@ -208,6 +208,7 @@ WHERE f.scenario = 'forecast' AND f.day >= p.today AND f.day < p.today + p.horiz
 -- every number the text quotes, in one row
 CREATE OR REPLACE TEMP TABLE rw_n AS
 SELECT p.today, (p.today + p.horizon - 1)::DATE AS last_day,
+       strftime(p.today, '%-d %B %Y') AS today_txt, strftime((p.today + p.horizon - 1)::DATE, '%-d %B %Y') AS last_day_txt,
        round(sum(fc.chain), -1) AS chain, round(sum(fc.chain) - 1.645 * sqrt(sum(fc.chain)), -1) AS chain_lo,
        round(sum(fc.chain) + 1.645 * sqrt(sum(fc.chain)), -1) AS chain_hi,
        round(sum(fc.arima), -1) AS arima, round(avg(abs(fc.arima - fc.actual))) AS mae_arima,
@@ -251,16 +252,16 @@ SELECT '- Expect about **{{chain:metric}}** parcels in the next four weeks; the 
        'card'::MARKDOWN_STYLE, 'tip: The answer in 30 seconds'::MARKDOWN_TONE, * FROM rw_n;
 
 SELECT 'The question'::TAB;
-SELECT 'It is **{{today:date}}**. The returns desk of an online shop has to plan staff and space for the next four weeks, until **{{last_day:date}}**. How many parcels will come back?
+SELECT 'It is **{{today_txt}}**. The returns desk of an online shop has to plan staff and space for the next four weeks, until **{{last_day_txt}}**. How many parcels will come back?
 
-Twelve days ago the shop ended its May sale: seven days at more than twice the usual sales, and deal buyers send more back — about **{{p_promo}} %** of the units against **{{p_regular}} %** in a normal week. In two weeks the June sale follows. Both shape the next four weeks, and the usual forecast sees neither properly.'::MARKDOWN, *
+Twelve days ago the shop ended its May sale: seven days at more than twice the usual sales, and deal buyers send more back — about **{{p_promo}}%** of the units against **{{p_regular}}%** in a normal week. In two weeks the June sale follows. Both shape the next four weeks, and the usual forecast sees neither properly.'::MARKDOWN, *
 FROM rw_n;
 SELECT 'Parcels expected at the returns desk in the next four weeks'::GROUP;
 SELECT chain::METRIC, 'chain forecast'::LABEL FROM rw_n;
 SELECT shortcut::METRIC, 'shortcut: sales × return rate'::LABEL FROM rw_n;
-SELECT gap_pct::PERCENT, 'chain against shortcut'::LABEL FROM rw_n;
+SELECT gap_pct::PERCENT, 'more with the chain than the shortcut'::LABEL FROM rw_n;
 SELECT 'end'::ENDGROUP;
-SELECT 'The chain expects **{{chain:metric}}** parcels (a 90 % range of {{chain_lo:metric}} to {{chain_hi:metric}}), the shortcut **{{shortcut:metric}}**. In total the two are **{{gap_pct:pct}}** apart. The bigger difference is *when* the parcels arrive — and the days are what a planner staffs for. The rest of this page explains why, and checks both against what really came in.
+SELECT 'The chain expects **{{chain:metric}}** parcels (a 90% range of {{chain_lo:metric}} to {{chain_hi:metric}}), the shortcut **{{shortcut:metric}}**. In total the two are **{{gap_pct:pct}}** apart. The bigger difference is *when* the parcels arrive — and the days are what a planner staffs for. The rest of this page explains why, and checks both against what really came in.
 
 > The four-week total is not the problem. The days are.'::MARKDOWN, * FROM rw_n;
 
@@ -281,7 +282,7 @@ SELECT r.day::XAXIS, 'What arrived' ::CATEGORY, r.received AS "Parcels received"
          WHEN q.today - 70 THEN printf('In regular weeks about %d parcels arrive a day, and they follow the sales of two weeks before. Here the shortcut does fine.',
                                         (SELECT round(avg(received))::INT FROM rw_actual a WHERE a.day BETWEEN q.today - 84 AND q.today - 56))
          WHEN (SELECT start_day FROM rw_promo WHERE promo = 'May sale') THEN 'The May sale starts: for a week, more than twice the usual units are sold — and promotion buyers send more back.'
-         WHEN q.today - 1 THEN printf('Today, %s: the sale''s returns have only started to come in. About %d %% of them are here; the rest is still on the road.',
+         WHEN q.today - 1 THEN printf('Today, %s: the sale''s returns have only started to come in. About %d%% of them are here; the rest is still on the road.',
                                         strftime(q.today, '%-d %B'), (SELECT may_in_pct::INT FROM rw_n))
        END ::STORY
 FROM rw_actual r LEFT JOIN rw_promo p ON p.start_day = r.day AND NOT p.planned, rw_param q
@@ -290,13 +291,13 @@ SELECT 'The May sale (shaded) more than doubled the units sold for a week. Its r
 
 SELECT 'One day of sales'::TAB;
 SELECT 1000 AS units ::NUMBER, 'Units sold'::LABEL;
-SELECT day_kind ::BUTTONS FROM (VALUES ('a regular day'), ('a promotion day')) t(day_kind);
+SELECT day_kind ::BUTTONS, 'Kind of day'::LABEL FROM (VALUES ('a regular day'), ('a promotion day')) t(day_kind);
 -- the day followed in this part: its units and the share that comes back
 CREATE OR REPLACE TEMP VIEW rw_day AS
 SELECT greatest(1, coalesce(getvariable('units'), 1000)) AS units,
        coalesce(getvariable('day_kind'), 'a regular day') = 'a promotion day' AS promo,
        (SELECT p FROM rw_share WHERE on_promo = (coalesce(getvariable('day_kind'), 'a regular day') = 'a promotion day')) AS share;
-SELECT 'To see where the wave comes from, follow one day: {{@units}} units sold on {{@day_kind}}. About **{{share_pct}} %** of them — **{{back:metric}} units** — will come back, but not at once. Two clocks run one after the other.
+SELECT 'To see where the wave comes from, follow one day: {{@units}} units sold on {{@day_kind}}. About **{{share_pct}}%** of them — **{{back:metric}} units** — will come back, but not at once. Two clocks run one after the other.
 
 The **customer''s clock**: how long until they ask to return. Most ask within the first two weeks, some much later; on average after about **{{ask_mean}} days**. The **parcel''s clock**: how long the parcel travels once they ask, on average about **{{travel_mean}} days**. Put together, half of the {{back:metric}} parcels are at the warehouse after **{{half_days}} days**, nine in ten after **{{p90_days}} days**. Change the units or the kind of day: the curves keep their shape — promotion buyers return more often, not sooner.
 
@@ -322,23 +323,25 @@ SELECT '$$\text{receipts}_t \;=\; \sum_{s} \text{sales}_s \cdot p_s \sum_{k} f_{
 $p_s$ is the share returned (higher for promotion days), $f_{\text{ask}}$ and $f_{\text{travel}}$ are the two delay curves. A storm enters as a cap on the receipts of its days, with the rest carried forward. In statistics this is a *survival convolution*: survival models describe each delay, the convolution turns them into a forecast per calendar day.'::MARKDOWN, 'note'::CALLOUT;
 SELECT 'Two properties follow directly. Returns of sales made before today are already on their way and are counted with their own clocks — nothing is forgotten because it was sold last month. And any sales forecast can be pushed through the chain, so a planned promotion, or a cancelled one, shows up in the returns without refitting anything.
 
-Everything the chain needs is learnt from the shop''s own records, on {{today:date}}, with anofox_statistics:
+Everything the chain needs is learnt from the shop''s own records, on {{today_txt}}, with anofox_statistics:
 
 - **The share returned** comes from orders old enough that every return has been asked for — sold 70 to 250 days ago. Recent orders would make it look too low: their returns are still coming. That is the trap a return rate falls into.
 - **The customer''s clock** is a Weibull model fitted on the {{ask_n:metric}} returns of those same orders.
 - **The parcel''s clock** is a Weibull model fitted on the {{travel_n:metric}} requests of the last four months. {{travel_censored:metric}} of those parcels are still on the road today. Leaving them out would keep only the fast ones; counting them as arrived would make the journey too short. They count as *censored*: we know they have travelled at least this long, and the model uses exactly that.
 
 Both models also ask whether promotion buyers behave differently. They return more often — but not sooner, and their parcels travel no longer.'::MARKDOWN, * FROM rw_n;
-SELECT 'Customer asks: shape' AS "What was fitted" ::TABLE, round(f.shape, 2) AS "Fitted", p.ask_shape AS "True" FROM rw_fit_ask f, rw_param p
-UNION ALL SELECT 'Customer asks: scale (days)', round(f.scale, 1), p.ask_scale FROM rw_fit_ask f, rw_param p
-UNION ALL SELECT 'Parcel travels: shape', round(f.shape, 2), p.travel_shape FROM rw_fit_travel f, rw_param p
-UNION ALL SELECT 'Parcel travels: scale (days)', round(f.scale, 1), p.travel_scale FROM rw_fit_travel f, rw_param p
-UNION ALL SELECT 'Share returned, regular days (%)', round(100 * s.p, 1), 100 * p.p_regular FROM rw_share s, rw_param p WHERE NOT s.on_promo
-UNION ALL SELECT 'Share returned, promotion days (%)', round(100 * s.p, 1), 100 * p.p_promo FROM rw_share s, rw_param p WHERE s.on_promo;
+SELECT 'none'::TOOLBAR;
+SELECT what AS "What was fitted" ::TABLE, round(fitted, 1) AS "Fitted" ::NOBAR, round(truth, 1) AS "True" ::NOBAR FROM (
+SELECT 1 AS k, 'Customer asks: shape' AS what, f.shape AS fitted, p.ask_shape AS truth FROM rw_fit_ask f, rw_param p
+UNION ALL SELECT 2, 'Customer asks: scale (days)', f.scale, p.ask_scale FROM rw_fit_ask f, rw_param p
+UNION ALL SELECT 3, 'Parcel travels: shape', f.shape, p.travel_shape FROM rw_fit_travel f, rw_param p
+UNION ALL SELECT 4, 'Parcel travels: scale (days)', f.scale, p.travel_scale FROM rw_fit_travel f, rw_param p
+UNION ALL SELECT 5, 'Share returned, regular days (%)', 100 * s.p, 100 * p.p_regular FROM rw_share s, rw_param p WHERE NOT s.on_promo
+UNION ALL SELECT 6, 'Share returned, promotion days (%)', 100 * s.p, 100 * p.p_promo FROM rw_share s, rw_param p WHERE s.on_promo) ORDER BY k;
 SELECT '*Because the shop is synthetic, the fit can be checked: every value lands next to the truth it was drawn from.*'::MARKDOWN;
 
 SELECT 'Against the truth'::TAB;
-SELECT 'Because the shop is synthetic, the next four weeks have already happened. Three forecasts were made on {{today:date}}, all with the same sales plan: the shortcut, the chain, and a standard time-series model — an ARIMA on the daily receipts that is given the sales of the one to three weeks before each day. The grey line is what really arrived.'::MARKDOWN, * FROM rw_n;
+SELECT 'Because the shop is synthetic, the next four weeks have already happened. Three forecasts were made on {{today_txt}}, all with the same sales plan: the shortcut, the chain, and a standard time-series model — an ARIMA on the daily receipts that is given the sales of the one to three weeks before each day. The grey line is what really arrived.'::MARKDOWN, * FROM rw_n;
 SELECT m.day::XAXIS, m.method::CATEGORY, m.parcels AS "Parcels per day" ::LINECHART,
        m.lo90::BAND_LOWER, m.hi90::BAND_UPPER, m.lo50::BAND_LOWER, m.hi50::BAND_UPPER,
        'What arrived:neutral; Chain:#2563eb; ARIMA:#7c3aed; Shortcut:#d97706' ::COLORS, 'none' ::POINTS, 'end' ::LEGEND, 'Parcels per day, next four weeks: forecasts and what arrived' ::TITLE,
@@ -352,23 +355,26 @@ FROM (SELECT day, 1 AS ord, 'What arrived' AS method, actual AS parcels, NULL::D
       UNION ALL SELECT day, 3, 'ARIMA', arima, NULL, NULL, NULL, NULL,
              'The ARIMA follows the level but lags the turns: one year of receipts holds only two sales to learn from.' FROM rw_fc
       UNION ALL SELECT day, 4, 'Chain', chain, lo90, hi90, lo50, hi50,
-             'The chain stays on top of what arrived, almost always inside its 90 % range.' FROM rw_fc) m
+             'The chain stays on top of what arrived, almost always inside its 90% range.' FROM rw_fc) m
 LEFT JOIN rw_promo p ON p.start_day = m.day AND m.method = 'Chain'
 ORDER BY m.ord, m.day;
-SELECT 'Shaded around the chain: the 50 % and 90 % ranges of a day''s count.'::MARKDOWN, 'caption'::MARKDOWN_STYLE;
-SELECT 'Over the four weeks the chain is **{{err_chain:pct}} {{dir_chain}}** the parcels that arrived, the ARIMA **{{err_arima:pct}} {{dir_arima}}**, the shortcut **{{err_short:pct}} {{dir_short}}**. Day by day the differences are larger: the chain misses by **{{mae_chain:metric}}** parcels on an average day — about what chance alone gives —, the ARIMA by **{{mae_arima:metric}}**, the shortcut by **{{mae_short:metric}}**, and on its worst day by {{worst_short:metric}}.
+SELECT 'Shaded around the chain: the 50% and 90% ranges of a day''s count.'::MARKDOWN, 'caption'::MARKDOWN_STYLE;
+SELECT 'Over the four weeks the chain is **{{err_chain:pct}} {{dir_chain}}** the parcels that arrived, the ARIMA **{{err_arima:pct}} {{dir_arima}}**, the shortcut **{{err_short:pct}} {{dir_short}}**. Day by day the differences are larger: the chain misses by **{{mae_chain:metric}}** parcels on an average day — about what chance alone gives — the ARIMA by **{{mae_arima:metric}}**, the shortcut by **{{mae_short:metric}}**, and on its worst day by {{worst_short:metric}}.
 
 The shortcut puts the May sale''s returns into one peak two weeks after the sale and then runs short while the long tail is still coming in. The ARIMA sees the sale in its inputs but has to learn from one year of receipts what a sale does — and a year holds only two sales. The chain does not learn that from the receipts at all: it knows how each unit comes back.
 
 > The chain misses by about what chance alone gives.'::MARKDOWN, * FROM rw_n;
+SELECT 'none'::TOOLBAR;
 SELECT 'Chain' AS "Method" ::TABLE, chain AS "Parcels, 4 weeks", err_chain AS "Off in total, %", mae_chain AS "Average miss per day" FROM rw_n
 UNION ALL SELECT 'ARIMA with lagged sales', arima, err_arima, mae_arima FROM rw_n
 UNION ALL SELECT 'Shortcut', shortcut, err_short, mae_short FROM rw_n
 UNION ALL SELECT 'What arrived', actual, NULL, NULL FROM rw_n;
 
 SELECT 'What if'::TAB;
-SELECT 'The chain answers planning questions without refitting: change the input, keep the curves. Two questions the planner gets every week: what does a storm next week do to the desk, and what happens if the June sale is cancelled?'::MARKDOWN;
-SELECT scenario::BUTTONS FROM (VALUES ('Storm next week'), ('No June sale')) t(scenario);
+SELECT 'The chain answers planning questions without refitting: change the input, keep the curves. Two questions the planner gets every week: what does a storm next week do to the desk, and what happens if the June sale is cancelled?
+
+What if: {{@scenario}}'::MARKDOWN;
+SELECT scenario::BUTTONS, 'Scenario'::LABEL FROM (VALUES ('Storm next week'), ('No June sale')) t(scenario);
 SELECT m.day::XAXIS, m.line::CATEGORY, m.parcels AS "Parcels per day" ::LINECHART,
        'Plan as it is:#2563eb; With the change:warn' ::COLORS, 'none' ::POINTS, 'end' ::LEGEND,
        'Parcels per day: the plan against the change' ::TITLE,

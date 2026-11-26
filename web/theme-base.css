@@ -723,14 +723,17 @@ body.dark .dp-img-row.has-dark .dp-img-missing{display:none}
 /* #1378 a ::STORY chart in a story: the chart stays (sticky) while its
    steps pass by as cards; the stepper's own buttons and caption give way */
 .dp-story .story-scrolly{grid-column:1/-1;position:relative;min-width:0;overflow-x:clip}
-.dp-story .story-scrolly>.panel{position:sticky;top:calc(var(--story-top,0px) + 3.6rem);z-index:3;width:100%;min-width:0;box-sizing:border-box;box-shadow:0 -3.6rem 0 0 var(--ax-canvas)}
+.dp-story .story-scrolly>.panel{position:sticky;top:calc(var(--story-top,0px) + 3.6rem);z-index:3;width:100%;min-width:0;box-sizing:border-box;box-shadow:0 -3.6rem 0 0 var(--ax-bg)}
 .dp-story .story-scrolly .dp-story,.dp-story .story-scrolly .dp-story-cap,.dp-story .story-scrolly .dp-story-link{display:none}
 .dp-story .story-steps{position:relative;z-index:1;padding:30vh 0 35vh;pointer-events:none}
 .dp-story .story-step{max-width:30rem;margin:0 0 42vh;padding:.9rem 1.1rem;border:1px solid var(--ax-line);border-left:3px solid var(--ax-line);border-radius:10px;background:var(--ax-card);box-shadow:var(--ax-shadow);font-size:1.02rem;line-height:1.55;color:var(--ax-ink);opacity:.55;transition:opacity .25s,border-color .25s;pointer-events:auto}
 .dp-story .story-step:last-child{margin-bottom:0}
 .dp-story .story-step.active{opacity:1;border-left-color:var(--ax-accent-bar)}
 @media (prefers-reduced-motion:reduce){.dp-story .story-step{transition:none}}
-@media (min-width:1300px){.dp-story .story-scrolly>.panel{top:calc(var(--story-top,0px) + 1.4rem);box-shadow:0 -1.4rem 0 0 var(--ax-canvas)}}
+/* a phone keeps only the chart sticky: its caption and SQL fold show once below the steps */
+.dp-story .story-scrolly-foot{display:none}
+@media (max-width:760px){.dp-story .story-scrolly>.panel .dp-caption,.dp-story .story-scrolly>.panel .story-sql{display:none}.dp-story .story-scrolly-foot{display:block;grid-column:1/-1;min-width:0;margin:0 0 1.2rem;padding:.1rem .9rem .8rem;border:1px solid var(--ax-line);border-radius:10px;background:var(--ax-card)}}
+@media (min-width:1300px){.dp-story .story-scrolly>.panel{top:calc(var(--story-top,0px) + 1.4rem);box-shadow:0 -1.4rem 0 0 var(--ax-bg)}}
 /* Wide screens: the contents move into a column on the right that stays in
    view while the article scrolls, the section in view marked by a bar. */
 @media (min-width:1300px){
@@ -1103,3 +1106,5 @@ body.dp-fit-measuring,body.dp-fit-measuring *{transition:none !important}
 .dp-map-find input:focus-visible{outline:2px solid var(--ax-accent);outline-offset:1px}
 /* M3e-1 (#646): 'print'::NORTH_ARROW — drawn for print / PNG / --svg, not on screen */
 @media screen{.panel svg .dp-print-only{display:none}}
+/* a display formula wider than its column even when drawn smaller (fitMath): fade at the cut edge (a mask: only the alpha counts) */
+.md-math-display.dp-math-more{-webkit-mask-image:linear-gradient(90deg,var(--ax-ink) 85%,transparent);mask-image:linear-gradient(90deg,var(--ax-ink) 85%,transparent)}

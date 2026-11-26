@@ -151,6 +151,7 @@ SELECT 'End'::TAB;
 SELECT 3 AS k ::NUMBER, 'Days'::LABEL;
 SELECT 'Look back {{@k}} days: {{n}} units.'::MARKDOWN, round(sum(units)) AS n FROM sales WHERE day >= DATE '2026-03-01' - INTERVAL (coalesce(getvariable('k'), 3)) DAY;
 SELECT day::XAXIS, units::BARCHART FROM sales;
+SELECT '$$\\text{receipts}_t \\;=\\; \\sum_{s=1}^{n} \\text{sales}_s \\cdot p_s \\sum_{k=0}^{60} f_{\\text{ask}}(k)\\, f_{\\text{travel}}(t - s - k) \\;+\\; \\text{storm}_t$$'::MARKDOWN;
 ${Array.from({ length: 12 }, (_, i) => `SELECT 'Filler paragraph ${i} so the page scrolls.'::MARKDOWN;`).join("\n")}
 `;
   const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 }, reducedMotion: "reduce", permissions: ["clipboard-read", "clipboard-write"] });
@@ -172,7 +173,7 @@ ${Array.from({ length: 12 }, (_, i) => `SELECT 'Filler paragraph ${i} so the pag
   await page.waitForTimeout(200);
   const copied = await page.evaluate(() => navigator.clipboard.readText());
   check(/[?&]tab=End(&|$)/.test(copied), `(a3) the heading link copies ?tab=End (${copied.slice(0, 80)}…)`);
-  const folds = await page.evaluate(() => [...document.querySelectorAll(".story-sql code")].map((c) => c.textContent));
+  const folds = await page.evaluate(() => [...document.querySelectorAll(".panel .story-sql code")].map((c) => c.textContent));
   check(folds.length === 2 && folds.every((t) => /::(LINECHART|BARCHART)/.test(t) && /FROM sales/.test(t)), `(a3) each chart has its SQL folded (${folds.length})`);
   check(await page.evaluate(() => /sales/.test(document.querySelector(".story-sql-reads")?.textContent || "")), "(a3) …naming the setup table it reads");
   const term = await page.evaluate(() => [...document.querySelectorAll(".story-term")].map((t) => t.textContent));
@@ -201,6 +202,9 @@ ${Array.from({ length: 12 }, (_, i) => `SELECT 'Filler paragraph ${i} so the pag
       seen.add(await box.evaluate((b) => b.querySelector(".panel")?._story?.step?.()));
     }
     check(seen.has(0) && seen.has(1) && seen.has(2), `(a3) …stepping 0 → 1 → 2 as it scrolls (${[...seen].join(",")})`);
+    // the strip above the sticky chart is covered (a colour, not the canvas' background list)
+    const shadow = await box.evaluate((b) => getComputedStyle(b.querySelector(".panel")).boxShadow);
+    check(shadow && shadow !== "none", `(a3) …the strip above the sticky chart is covered (${shadow})`);
   }
   check(!errs.length, "(a3) no page errors: " + errs.join(" | "));
   await ctx.close();
@@ -210,6 +214,27 @@ ${Array.from({ length: 12 }, (_, i) => `SELECT 'Filler paragraph ${i} so the pag
   await phone.waitForFunction(() => /\d+ panels?/.test(document.getElementById("status")?.textContent || ""), null, { timeout: 120000 });
   const ph = await phone.evaluate(() => ({ sw: document.documentElement.scrollWidth, w: innerWidth, rows: new Set([...document.querySelectorAll(".dash > .tabbar > .tab-btn")].map((b) => Math.round(b.getBoundingClientRect().top))).size }));
   check(ph.sw <= ph.w && ph.rows === 1, `(a3) on a phone: no sideways scroll, contents in one row (${JSON.stringify(ph)})`);
+  // only the chart stays sticky; its "How this is computed" shows once after the steps
+  await phone.evaluate(() => scrollTo(0, document.body.scrollHeight));
+  await phone.waitForTimeout(400);
+  const pf = await phone.evaluate(() => {
+    const sticky = document.querySelector(".story-scrolly > .panel .story-sql");
+    const foot = document.querySelector(".story-scrolly + .story-scrolly-foot");
+    const m = document.querySelector(".md-math-display.md-math-done");
+    return {
+      stickySql: sticky ? getComputedStyle(sticky).display : "absent",
+      foot: foot ? getComputedStyle(foot).display : "absent",
+      footSql: !!foot?.querySelector(".story-sql"),
+      mathFits: !!m && (m.scrollWidth <= m.clientWidth + 1 || m.classList.contains("dp-math-more")),
+      mathSmaller: !!m && parseFloat(m.style.fontSize || "100") < 100,
+    };
+  });
+  check(pf.stickySql === "none" && pf.foot === "block" && pf.footSql, `(a3) on a phone: the sticky chart without its SQL fold, which follows the steps (${JSON.stringify(pf)})`);
+  check(pf.mathFits && pf.mathSmaller, `(a3) on a phone: a wide formula is drawn smaller, a cut one fades (${JSON.stringify(pf)})`);
+  await phone.evaluate(() => scrollTo(0, 0));
+  await phone.waitForTimeout(600);
+  const left = await phone.evaluate(() => document.querySelector(".dash > .tabbar").scrollLeft);
+  check(left === 0, `(a3) on a phone: back at the opening, the contents start at part 1 (${left})`);
   await phone.close();
 }
 
