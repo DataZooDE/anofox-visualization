@@ -27,7 +27,7 @@
 //! * The page itself then gets a page session (as an embed link's page does)
 //!   that its requests carry in `X-Anofox-Session`.
 
-use super::session::{random_b64, secret, Sessions};
+use super::session::{random_b64, secret, sha256_b64, Sessions};
 use super::{Reply, Scope};
 use crate::host::access::{clean_claim, Claims, MAX_ATTRS, MAX_GROUPS};
 use crate::host::serving::{html_escape, sql_literal, valid_ident};
@@ -196,6 +196,31 @@ fn parse_hash(s: &str) -> Result<Access, String> {
     })
 }
 
+/// The audience of a token for a dashboard with this `access` (`base`: the
+/// login cookie's or the page session's): for a password it names the hash (a
+/// SHA-256 of it), so replacing the hash ends every login and open page made
+/// with the old password, even when `session_secret_env` keeps the signing
+/// key across restarts (#1391).
+fn aud_for(base: &str, access: &Access) -> String {
+    match access {
+        Access::Public => base.to_string(),
+        Access::Password {
+            iterations,
+            salt,
+            key,
+        } => {
+            use base64::Engine;
+            let b = base64::engine::general_purpose::STANDARD_NO_PAD;
+            let tag = sha256_b64(&format!(
+                "{iterations}${}${}",
+                b.encode(salt),
+                b.encode(key)
+            ));
+            format!("{base}:{}", &tag[..16])
+        }
+    }
+}
+
 /// Does `password` match? (Constant time in the derived key.)
 fn check(access: &Access, password: &str) -> bool {
     match access {
@@ -291,12 +316,45 @@ impl Share {
     /// A login cookie (any of `cookies`) valid for dashboard `id`.
     pub fn logged_in(&self, id: &str, cookies: &[&str]) -> Result<(), &'static str> {
         let mut last = "malformed_token";
+        let Some(d) = self.get(id) else {
+            return Err("out_of_scope");
+        };
+        let aud = aud_for(LOGIN_AUD, &d.access);
         for c in cookies {
-            match self.sessions.verify(LOGIN_AUD, c.trim()) {
+            match self.sessions.verify(&aud, c.trim()) {
                 Ok(s) if s.scope.dashboards.as_deref() == Some(&[id.to_string()][..]) => {
                     return Ok(())
                 }
                 Ok(_) => last = "out_of_scope",
+                // (`bad_audience`: another dashboard's login, or one made
+                // with a password this dashboard no longer has)
+                Err(e) => last = e,
+            }
+        }
+        Err(last)
+    }
+
+    /// A page session for shared dashboard `id` (`None`: not shared).
+    pub fn page_session(&self, id: &str) -> Option<(String, super::session::Session)> {
+        let d = self.get(id)?;
+        Some(self.sessions.issue(
+            &aud_for(PAGE_AUD, &d.access),
+            self.session_ttl,
+            &d.claims,
+            &d.scope,
+        ))
+    }
+
+    /// The page session in `token`: signed by us for a dashboard that is still
+    /// shared, with the password it has now.
+    pub fn verify_page(&self, token: &str) -> Result<super::session::Session, &'static str> {
+        let mut last = "bad_audience";
+        for (id, d) in &self.dashboards {
+            match self.sessions.verify(&aud_for(PAGE_AUD, &d.access), token) {
+                Ok(s) if s.scope.dashboards.as_deref() == Some(&[id.clone()][..]) => return Ok(s),
+                // public dashboards share one audience: try the next one
+                Ok(_) => last = "out_of_scope",
+                Err("bad_audience") => {}
                 Err(e) => last = e,
             }
         }
@@ -326,9 +384,12 @@ impl Share {
             self.limiter.fail(id, peer);
             return Err(LoginError::WrongPassword);
         }
-        let (token, _) = self
-            .sessions
-            .issue(LOGIN_AUD, self.session_ttl, &d.claims, &d.scope);
+        let (token, _) = self.sessions.issue(
+            &aud_for(LOGIN_AUD, &d.access),
+            self.session_ttl,
+            &d.claims,
+            &d.scope,
+        );
         Ok(token)
     }
 
@@ -655,7 +716,7 @@ mod tests {
         let tok = s.login("ops", "a long enough password", peer).unwrap();
         assert!(s.logged_in("ops", &[&tok]).is_ok());
         // a login for one dashboard is not a login for another
-        assert_eq!(s.logged_in("ops2", &[&tok]), Err("out_of_scope"));
+        assert_eq!(s.logged_in("ops2", &[&tok]), Err("bad_audience"));
         assert!(s.logged_in("ops", &["garbage"]).is_err());
         // a page session is not a login cookie
         let (page, _) = s.sessions.issue(
@@ -680,6 +741,57 @@ mod tests {
         // …another address still gets in
         let other: Option<IpAddr> = Some("198.51.100.1".parse().unwrap());
         assert!(s.login("ops", "a long enough password", other).is_ok());
+    }
+
+    /// #1391: a new password hash ends the logins made with the old one, also
+    /// when the signing key stays the same (`session_secret_env`).
+    #[test]
+    fn a_new_password_ends_old_logins() {
+        let key = "k".repeat(40);
+        let env = |_: &str| Some(key.clone());
+        let share = |v: Value| Share::from_json(v.as_object().unwrap(), &env);
+        let cfg = |h: &str| {
+            json!({"mode": "share", "session_secret_env": "SHARE_SESSION",
+                   "dashboards": {"ops": {"access": "password", "password_hash": h}}})
+        };
+        let h1 = hash_password("the first long password");
+        let s1 = share(cfg(&h1)).unwrap();
+        let tok = s1.login("ops", "the first long password", None).unwrap();
+        let (page, _) = s1.page_session("ops").unwrap();
+        // a restart with the same hash and key: still signed in, the page works
+        let again = share(cfg(&h1)).unwrap();
+        assert!(again.logged_in("ops", &[&tok]).is_ok());
+        assert!(again.verify_page(&page).is_ok());
+        // a restart with a new hash, same key: signed out, the open page too
+        let h2 = hash_password("the second long password");
+        let s2 = share(cfg(&h2)).unwrap();
+        assert_eq!(s2.logged_in("ops", &[&tok]), Err("bad_audience"));
+        assert_eq!(s2.verify_page(&page).err(), Some("bad_audience"));
+        let tok2 = s2.login("ops", "the second long password", None).unwrap();
+        assert!(s2.logged_in("ops", &[&tok2]).is_ok());
+        // a dashboard no longer shared
+        let s3 = share(
+            json!({"mode": "share", "session_secret_env": "SHARE_SESSION",
+                              "dashboards": {"pub": {"access": "public"}}}),
+        )
+        .unwrap();
+        assert_eq!(s3.logged_in("ops", &[&tok2]), Err("out_of_scope"));
+        let (page2, _) = s2.page_session("ops").unwrap();
+        assert!(s2.verify_page(&page2).is_ok());
+        assert!(s3.verify_page(&page2).is_err());
+        // two public dashboards (one audience): each one's page session works
+        let two = share(json!({"mode": "share", "session_secret_env": "SHARE_SESSION",
+                               "dashboards": {"a": {"access": "public"}, "b": {"access": "public"}}}))
+        .unwrap();
+        let (pb, _) = two.page_session("b").unwrap();
+        assert_eq!(
+            two.verify_page(&pb).unwrap().scope.dashboards,
+            Some(vec!["b".to_string()])
+        );
+        // a public dashboard's page session: not one of a password dashboard
+        let (pub_page, _) = s3.page_session("pub").unwrap();
+        assert!(s3.verify_page(&pub_page).is_ok());
+        assert!(s2.verify_page(&pub_page).is_err());
     }
 
     #[test]
