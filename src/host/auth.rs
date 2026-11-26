@@ -765,16 +765,18 @@ impl Auth {
             method: None,
             audited: false,
         };
-        let tries: [(&'static str, Option<(&session::Sessions, &str)>); 2] = [
-            ("embed", self.embed.as_ref().map(|e| (&e.sessions, "embed"))),
+        // (each a cheap HMAC check; the share one is bound to the
+        // dashboard's current password, #1391)
+        let tries: [(&'static str, Option<Result<session::Session, &'static str>>); 2] = [
             (
-                "share",
-                self.share.as_ref().map(|s| (&s.sessions, share::PAGE_AUD)),
+                "embed",
+                self.embed.as_ref().map(|e| e.sessions.verify("embed", t)),
             ),
+            ("share", self.share.as_ref().map(|s| s.verify_page(t))),
         ];
-        for (method, k) in tries {
-            let Some((sessions, aud)) = k else { continue };
-            match sessions.verify(aud, t) {
+        for (method, res) in tries {
+            let Some(res) = res else { continue };
+            match res {
                 Ok(sess) => {
                     return Ok(Identity {
                         claims: sess.claims,
@@ -1057,9 +1059,7 @@ impl Auth {
                     s.logged_in(id, &c).map_err(deny("share"))?;
                 }
                 let page_session = share::is_page(path, id).then(|| {
-                    let (page, sess) =
-                        s.sessions
-                            .issue(share::PAGE_AUD, s.session_ttl, &d.claims, &d.scope);
+                    let (page, sess) = s.page_session(id).expect("a shared dashboard");
                     // A public page's views are not each an audit event.
                     if d.access != share::Access::Public {
                         self.audit(Event {

@@ -3191,8 +3191,11 @@ How it works:
   dashboards (`share`) — never a password, and only configured dashboard ids.
   A public dashboard's page views are not audit events (the request log has
   them).
-- To revoke a password, replace its hash and restart; existing login cookies
-  stay valid until they expire unless `session_secret_env` changes too.
+- To revoke a password, replace its hash and restart: a login cookie names
+  the hash it was made with, so every login made with the old password ends
+  (also with the same `session_secret_env`). Removing the dashboard from
+  `dashboards` ends its logins too. Page sessions already handed out run
+  until `session_ttl_s`, as for any login (#1391).
 
 ### Audit log
 

@@ -68,5 +68,30 @@ cookie=$(grep -i '^set-cookie:' <<<"$hdr" | sed 's/^[Ss]et-[Cc]ookie: //; s/;.*/
 curl -s -H "Cookie: $cookie" "$B/d/p" | grep -q 'action="/share/p"' && fail "static server: still the password page"
 [ "$(curl -s -o /dev/null -w '%{http_code}' -H "Cookie: $cookie" "$B/")" = 401 ] \
   || fail "static server: the share cookie is no login for the rest"
+# #1391: with session_secret_env a login outlives a restart, but not a new
+# password: the cookie names the hash it was made with.
+binstart() { # binstart <hash> → the serve binary on BIN_PORT, its pid in $BINPID
+  "$SERVE" --dashboards "$AUTH/bindash" --db "$WORK/bin.duckdb" --init /dev/null --port "$BIN_PORT" --no-open \
+    --auth "{\"mode\":\"share\",\"session_secret_env\":\"SHARE_SESSION\",\"dashboards\":{\"p\":{\"access\":\"password\",\"password_hash\":\"$1\"}}}" \
+    --audit "$WORK/bin-audit.jsonl" >> bin.out 2>&1 &
+  BINPID=$!
+  PIDS+=("$BINPID")
+  for _ in $(seq 40); do curl -s -o /dev/null "$B/d/p" && break; sleep 0.25; done
+}
+binstop() { kill "$BINPID"; wait "$BINPID" 2>/dev/null || true; }
+kill "${PIDS[-1]}"; wait "${PIDS[-1]}" 2>/dev/null || true
+binstart "$HASH"
+hdr=$(curl -s -o /dev/null -D - -H "Origin: $B" --data-urlencode "password=$PASSWORD" "$B/share/p")
+cookie=$(grep -i '^set-cookie:' <<<"$hdr" | sed 's/^[Ss]et-[Cc]ookie: //; s/;.*//' | tr -d '\r')
+[ -n "$cookie" ] || fail "static server (session_secret_env): no cookie"
+binstop; binstart "$HASH"
+curl -s -H "Cookie: $cookie" "$B/d/p" | grep -q 'action="/share/p"' \
+  && fail "static server: a restart with the same key and password should keep the login"
+HASH2="$(printf '%s\n' "another password, long enough" | "$SERVE" share-password | sed -n 's/^password_hash: //p')"
+binstop; binstart "$HASH2"
+curl -s -H "Cookie: $cookie" "$B/d/p" | grep -q 'action="/share/p"' \
+  || fail "static server: a new password should end the old login"
+binstop
+echo "ok  a login outlives a restart (session_secret_env), not a new password"
 grep -q "$PASSWORD" "$WORK"/*.jsonl && fail "a password reached a log"
 echo "share e2e ok — logs and screenshots in $WORK"
