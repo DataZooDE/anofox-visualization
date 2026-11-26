@@ -352,7 +352,8 @@ impl Share {
         for (id, d) in &self.dashboards {
             match self.sessions.verify(&aud_for(PAGE_AUD, &d.access), token) {
                 Ok(s) if s.scope.dashboards.as_deref() == Some(&[id.clone()][..]) => return Ok(s),
-                Ok(_) => return Err("out_of_scope"),
+                // public dashboards share one audience: try the next one
+                Ok(_) => last = "out_of_scope",
                 Err("bad_audience") => {}
                 Err(e) => last = e,
             }
@@ -778,6 +779,15 @@ mod tests {
         let (page2, _) = s2.page_session("ops").unwrap();
         assert!(s2.verify_page(&page2).is_ok());
         assert!(s3.verify_page(&page2).is_err());
+        // two public dashboards (one audience): each one's page session works
+        let two = share(json!({"mode": "share", "session_secret_env": "SHARE_SESSION",
+                               "dashboards": {"a": {"access": "public"}, "b": {"access": "public"}}}))
+        .unwrap();
+        let (pb, _) = two.page_session("b").unwrap();
+        assert_eq!(
+            two.verify_page(&pb).unwrap().scope.dashboards,
+            Some(vec!["b".to_string()])
+        );
         // a public dashboard's page session: not one of a password dashboard
         let (pub_page, _) = s3.page_session("pub").unwrap();
         assert!(s3.verify_page(&pub_page).is_ok());
