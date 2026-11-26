@@ -244,6 +244,84 @@ ${Array.from({ length: 12 }, (_, i) => `SELECT 'Filler paragraph ${i} so the pag
   await ctx.close();
 }
 
+// (a5) two button inputs in two parts, the first inside a sentence: a click
+// on one leaves the other's single control in its sentence and its state
+// (no stale second copy), each part's panels follow their own input — live
+// and in the export, where the two combine (each input's variants hold only
+// the panels it changes) and the sentence keeps its input
+{
+  const TWO = `-- @title Two inputs
+-- @layout story
+CREATE OR REPLACE TEMP TABLE t AS SELECT range AS x, range % 5 AS y FROM range(30);
+SELECT 'Part one'::TAB;
+SELECT kind ::BUTTONS FROM (VALUES ('low'), ('high')) v(kind);
+SELECT 'Follow a {{@kind}} day: factor {{f}}.'::MARKDOWN, CASE coalesce(getvariable('kind'), 'low') WHEN 'high' THEN 3 ELSE 1 END AS f;
+SELECT x::XAXIS, (y * CASE coalesce(getvariable('kind'), 'low') WHEN 'high' THEN 3 ELSE 1 END)::LINECHART FROM t ORDER BY x;
+SELECT 'Part two'::TAB;
+SELECT scen ::BUTTONS FROM (VALUES ('calm'), ('storm')) v(scen);
+SELECT 'Scenario: {{s}}.'::MARKDOWN, coalesce(getvariable('scen'), 'calm') AS s;
+SELECT x::XAXIS, (y + CASE coalesce(getvariable('scen'), 'calm') WHEN 'storm' THEN 10 ELSE 0 END)::BARCHART FROM t ORDER BY x;
+`;
+  const look = (pg) =>
+    pg.evaluate(() => {
+      const ctls = (v) => [...document.querySelectorAll(`.dash [data-varname="${v}"]`)];
+      const pick = (c) => c.querySelector('[aria-checked="true"], [aria-pressed="true"]')?.textContent.trim();
+      const kind = ctls("kind");
+      return {
+        kinds: kind.length,
+        inline: kind.length === 1 && !!kind[0].closest(".story-inline-slot") && !!kind[0].closest("p"),
+        kind: kind.map(pick).join(","),
+        scen: ctls("scen").map(pick).join(","),
+        factor: (document.querySelector(".dash").innerText.match(/factor (\d)/) || [])[1],
+        scenario: (document.querySelector(".dash").innerText.match(/Scenario: (\w+)/) || [])[1],
+      };
+    });
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 }, reducedMotion: "reduce", acceptDownloads: true });
+  const page = await ctx.newPage();
+  const errs = [];
+  page.on("pageerror", (e) => errs.push(String(e)));
+  await page.goto(`${base}?mode=view#sql=${b64(TWO)}`);
+  await page.waitForFunction(() => /\d+ panels?/.test(document.getElementById("status")?.textContent || "") && !document.body.classList.contains("loading"), null, { timeout: 120000 });
+  const settle = () => page.waitForFunction(() => !document.body.classList.contains("loading") && !document.querySelector(".dash .dp-pending"), null, { timeout: 30000 }).then(() => page.waitForTimeout(400));
+  const click = async (v, label) => {
+    await page.locator(`.dash [data-varname="${v}"] [role="radio"]`, { hasText: label }).click();
+    await settle();
+  };
+  await click("kind", "high");
+  let l = await look(page);
+  check(l.kinds === 1 && l.inline && l.kind === "high" && l.factor === "3", `(a5) the input in the sentence drives its part (${JSON.stringify(l)})`);
+  await click("scen", "storm");
+  l = await look(page);
+  check(l.kinds === 1 && l.inline, `(a5) after the other part's input: still one control in the sentence, no second copy (${l.kinds})`);
+  check(l.kind === "high" && l.factor === "3" && l.scen === "storm" && l.scenario === "storm", `(a5) …each part keeps its own value (${JSON.stringify(l)})`);
+  await click("kind", "low");
+  l = await look(page);
+  check(l.kinds === 1 && l.inline && l.kind === "low" && l.factor === "1" && l.scenario === "storm", `(a5) the sentence's control is the live one (${JSON.stringify(l)})`);
+  check(!errs.length, "(a5) no page errors: " + errs.join(" | "));
+  // the export, from the first values
+  await click("scen", "calm");
+  const [dl] = await Promise.all([page.waitForEvent("download", { timeout: 180000 }), page.click("#dlhtml")]);
+  const html = await (await import("fs")).promises.readFile(await dl.path(), "utf8");
+  const vars = [...html.matchAll(/<template data-var="(\w+)" data-val="[^"]*" data-stmt="(\d+)"/g)].map((m) => [m[1], m[2]]);
+  const stmtsOf = (v) => new Set(vars.filter((x) => x[0] === v).map((x) => x[1]));
+  const shared = [...stmtsOf("kind")].filter((x) => stmtsOf("scen").has(x));
+  check(stmtsOf("kind").size > 0 && stmtsOf("scen").size > 0 && !shared.length, `(a5) export: each input's variants hold only its own panels (shared: ${shared})`);
+  const off = await ctx.newPage();
+  const oerrs = [];
+  off.on("pageerror", (e) => oerrs.push(String(e)));
+  await off.setContent(html, { waitUntil: "load" });
+  await off.waitForTimeout(500);
+  l = await look(off);
+  check(l.kinds === 1 && l.inline, "(a5) export: the input stays inside its sentence");
+  await off.locator('[data-varname="kind"] [role="radio"]', { hasText: "high" }).click();
+  await off.locator('[data-varname="scen"] [role="radio"]', { hasText: "storm" }).click();
+  await off.waitForTimeout(200);
+  l = await look(off);
+  check(l.kind === "high" && l.factor === "3" && l.scen === "storm" && l.scenario === "storm", `(a5) export: the two inputs combine (${JSON.stringify(l)})`);
+  check(!oerrs.length, "(a5) no errors in the export: " + oerrs.join(" | "));
+  await ctx.close();
+}
+
 // (b) without the header: tabs as before
 {
   const { page, errs } = await open(`-- @title Returns\n${BODY}`);

@@ -16148,6 +16148,36 @@ function storyChrome(dash, on, sql) {
   // `name` goes — moved into the sentence, its caption kept as its label for
   // screen readers; a bar it leaves empty is hidden
   const inlineInputs = () => {
+    // the control of variable `name` outside the sentences (none: already in one)
+    const loose = (name) =>
+      [...dash.querySelectorAll("[data-varname]")].find(
+        (e) => (e.dataset.varname || "").toLowerCase() === name && !e.closest(".story-inline-slot"),
+      );
+    const put = (slot, ctl) => {
+      const home = ctl.parentElement;
+      // its caption: a text node or a bare element ("Units sold:") before the control
+      const caption = [...ctl.childNodes].find(
+        (c) => (c.nodeType === 3 && c.data.trim()) || (c.nodeType === 1 && !c.querySelector("input,select,button,summary") && /:\s*$/.test(c.textContent)),
+      );
+      if (caption) {
+        const label = caption.textContent.replace(/:\s*$/, "").trim();
+        const field = ctl.querySelector("input,select");
+        (field && !ctl.querySelector("[role=radio],[role=radiogroup] button") ? field : ctl).setAttribute("aria-label", label);
+        caption.remove();
+      }
+      ctl.classList.add("story-inline");
+      slot.replaceChildren(ctl);
+      const bar = home?.closest(".dp-autobar, .controls");
+      if (bar && !bar.querySelector("[data-varname]")) bar.hidden = true;
+    };
+    // A re-run replaces every control but keeps a text whose output is the
+    // same, slot and old control with it: the new control takes the old one's
+    // place, so the sentence holds the one control that is live (no stale
+    // copy there, no second one in the bar).
+    for (const slot of dash.querySelectorAll(":scope > .tabwrap .story-inline-slot[data-var]")) {
+      const ctl = loose(slot.dataset.var);
+      if (ctl) put(slot, ctl);
+    }
     for (const body of dash.querySelectorAll(":scope > .tabwrap .md-body")) {
       if (!body.textContent.includes("{{@")) continue;
       const walk = document.createTreeWalker(body, NodeFilter.SHOW_TEXT);
@@ -16156,30 +16186,15 @@ function storyChrome(dash, on, sql) {
       for (const n of hits) {
         const m = /\{\{@([A-Za-z_]\w*)\}\}/.exec(n.data);
         const name = m[1].toLowerCase();
-        const ctl = [...dash.querySelectorAll("[data-varname]")].find(
-          (e) => (e.dataset.varname || "").toLowerCase() === name && !e.closest(".story-inline-slot"),
-        );
+        const ctl = loose(name);
         if (!ctl) continue;
         const rest = n.splitText(m.index);
         rest.splitText(m[0].length);
         const slot = document.createElement("span");
         slot.className = "story-inline-slot";
-        const home = ctl.parentElement;
-        // its caption: a text node or a bare element ("Units sold:") before the control
-        const caption = [...ctl.childNodes].find(
-          (c) => (c.nodeType === 3 && c.data.trim()) || (c.nodeType === 1 && !c.querySelector("input,select,button,summary") && /:\s*$/.test(c.textContent)),
-        );
-        if (caption) {
-          const label = caption.textContent.replace(/:\s*$/, "").trim();
-          const field = ctl.querySelector("input,select");
-          (field && !ctl.querySelector("[role=radio],[role=radiogroup] button") ? field : ctl).setAttribute("aria-label", label);
-          caption.remove();
-        }
-        ctl.classList.add("story-inline");
-        slot.appendChild(ctl);
+        slot.dataset.var = name;
         rest.replaceWith(slot);
-        const bar = home?.closest(".dp-autobar, .controls");
-        if (bar && !bar.querySelector("[data-varname]")) bar.hidden = true;
+        put(slot, ctl);
       }
     }
   };
@@ -21082,6 +21097,15 @@ async function exportSnapshot() {
     (img) => !/^data:/i.test(img.getAttribute("src") || "")
   );
   await Promise.all(toInline.map((img) => inlineExportedImage(img)));
+  // An input inside a sentence ({{@name}}, #1379) sits in a <p>: written out
+  // as HTML, a <div> there would close the paragraph and drop the input onto
+  // a line of its own. Spans (the styles are by class) keep it in the sentence.
+  for (const el of snap.querySelectorAll(".story-inline-slot div")) {
+    const span = document.createElement("span");
+    for (const a of el.attributes) span.setAttribute(a.name, a.value);
+    span.append(...el.childNodes);
+    el.replaceWith(span);
+  }
   return { snap, math };
 }
 
@@ -21131,6 +21155,26 @@ async function exportInputVariants(baseSnap) {
   if (!metas.length) return null;
   const byStmt = (root) => new Map([...root.querySelectorAll(".panel[data-stmt]")].map((p) => [p.dataset.stmt, p]));
   const base = byStmt(baseSnap);
+  // What a panel shows, for telling whether a value changed it: attributes
+  // in one order, without the inputs it holds (the export's script marks
+  // their pick). Compared against a re-run at the values as they are, made
+  // the same way as each value's, so that only the panels an input changes
+  // are kept for it — a panel of another input is not swapped back to that
+  // input's first value (#1368: a story's day and scenario buttons).
+  const canon = (p) => {
+    const c = p.cloneNode(true);
+    c.querySelectorAll("[data-varname]").forEach((e) => e.remove());
+    c.classList.remove("dp-in", "dp-pending"); // its entrance, a run in flight
+    for (const e of [c, ...c.querySelectorAll("*")]) {
+      const at = [...e.attributes].map((a) => [a.name, a.value]).sort((x, y) => (x[0] < y[0] ? -1 : 1));
+      for (const [n] of at) e.removeAttribute(n);
+      for (const [n, v] of at) e.setAttribute(n, v);
+    }
+    return c.outerHTML;
+  };
+  await run(false);
+  await lazyFlushAll();
+  const ref = new Map([...byStmt((await exportSnapshot()).snap)].map(([k, p]) => [k, canon(p)]));
   const box = document.createElement("div");
   box.className = "dp-variants";
   box.hidden = true;
@@ -21147,8 +21191,7 @@ async function exportInputVariants(baseSnap) {
       await lazyFlushAll();
       const { snap } = await exportSnapshot();
       for (const [stmt, p] of byStmt(snap)) {
-        const b = base.get(stmt);
-        if (b && b.outerHTML === p.outerHTML) continue;
+        if (ref.get(stmt) === canon(p)) continue;
         changed.add(stmt);
         keep.push([o, stmt, p.outerHTML]);
         size += p.outerHTML.length;
