@@ -16224,6 +16224,21 @@ function storyChrome(dash, on, sql) {
       });
       box.append(panel, cards);
     }
+    // A phone has no room for a tall sticky card: there the chart's caption
+    // and "How this is computed" are hidden in it and shown once after the
+    // steps (theme-base.css, .story-scrolly-foot).
+    const extra = [...panel.querySelectorAll(".dp-caption, .story-sql")];
+    let foot = box.nextElementSibling?.classList.contains("story-scrolly-foot") ? box.nextElementSibling : null;
+    if (!foot && extra.length) {
+      foot = document.createElement("div");
+      foot.className = "story-scrolly-foot";
+      box.after(foot);
+    }
+    const sig = extra.map((e) => e.outerHTML).join("");
+    if (foot && foot._sig !== sig) {
+      foot._sig = sig;
+      foot.replaceChildren(...extra.map((e) => e.cloneNode(true)));
+    }
     if (box._synced) return;
     const cards = box.querySelector(":scope > .story-steps");
     // the step is the last card whose top has passed the reading line — a
@@ -16292,9 +16307,13 @@ function storyChrome(dash, on, sql) {
         b.classList.toggle("active", i === cur);
         b.classList.toggle("read", i < cur);
       });
-      // a bar that scrolls sideways (phones) keeps the part in view visible
-      if (cur < 0) return;
-      const bar = btns[cur].parentElement;
+      // a bar that scrolls sideways (phones) keeps the part in view visible,
+      // and is back at its start at the opening
+      const bar = btns[0].parentElement;
+      if (cur < 0) {
+        if (bar.scrollLeft) bar.scrollTo({ left: 0, behavior: "auto" });
+        return;
+      }
       if (bar.scrollWidth > bar.clientWidth + 1)
         bar.scrollTo({ left: btns[cur].offsetLeft - (bar.clientWidth - btns[cur].offsetWidth) / 2, behavior: "auto" });
     },
@@ -19402,7 +19421,29 @@ async function typesetMath(root) {
       el.title = e.message;
     }
   }
+  fitMath(root);
+  // KaTeX's fonts widen a formula once they have loaded: measure again then
+  document.fonts?.ready.then(() => fitMath(root));
 }
+// A display formula wider than its column (a phone) is drawn smaller, down to
+// 70 %; one still too wide scrolls sideways with a fade where it is cut.
+function fitMath(root) {
+  for (const el of root.querySelectorAll(".md-math-display.md-math-done")) {
+    if (!el.isConnected) continue;
+    el.style.fontSize = "";
+    if (!el.clientWidth) continue;
+    const k = el.clientWidth / el.scrollWidth;
+    if (k < 1) el.style.fontSize = `${Math.round(Math.max(0.7, k * 0.98) * 100)}%`;
+    const more = () => el.classList.toggle("dp-math-more", el.scrollLeft + el.clientWidth < el.scrollWidth - 1);
+    more();
+    if (!el._dpMore) (el._dpMore = true), el.addEventListener("scroll", more, { passive: true });
+  }
+}
+let fitMathTimer = 0;
+window.addEventListener("resize", () => {
+  clearTimeout(fitMathTimer);
+  fitMathTimer = setTimeout(() => fitMath(document), 150);
+});
 
 // Minimal, dependency-free Markdown → HTML (headings, bold/italic, inline +
 // fenced code, links, blockquotes, ordered/unordered lists, rules, GFM
