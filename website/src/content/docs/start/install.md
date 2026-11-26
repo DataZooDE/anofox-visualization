@@ -35,6 +35,17 @@ SET allow_unsigned_extensions = true;
 INSTALL anofox_visualization FROM 'https://datazoode.github.io/anofox-visualization/extensions';
 ```
 
+### The skills of a release
+
+Each release carries its agent skills (the Claude Code plugin `plugins/anofox-visualization/`) as `anofox-visualization-skills-$TAG.zip`, listed in the signed `SHA256SUMS`. The same folder is in every CLI archive (`skills/anofox-visualization/`). Use these when the tools you run are a release, so the skills describe exactly that version. `/plugin install anofox-visualization@anofox-visualization` follows `master`.
+
+```sh
+curl -fLO https://github.com/DataZooDE/anofox-visualization/releases/download/$TAG/anofox-visualization-skills-$TAG.zip
+sha256sum --check --ignore-missing SHA256SUMS
+unzip anofox-visualization-skills-$TAG.zip   # → anofox-visualization/ (.claude-plugin/plugin.json, skills/*/SKILL.md)
+claude --plugin-dir ./anofox-visualization
+```
+
 ## From source
 
 See [BUILD.md](https://github.com/DataZooDE/anofox-visualization/blob/master/BUILD.md): the render-only `make` build (the community binary) and the full toolkit with `duckext/scripts/build-native.sh` (Rust, libclang, wasm-bindgen + wasm-opt, Python 3 and a `duckdb` CLI).

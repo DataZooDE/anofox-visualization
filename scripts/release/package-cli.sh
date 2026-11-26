@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Build, smoke-test and package the CLI binaries for this machine:
 #   dashboard (static HTML / --check linter) and serve (--features serve, with
-#   the builder UI embedded) + README.md + LICENSE
+#   the builder UI embedded) + README.md + LICENSE + skills/anofox-visualization/
+#   (the agent skills of this version, #1389)
 #   output: $DIST/anofox-visualization-cli-<tag>-<rust target>.tar.gz  (.zip on Windows)
 #   env:    DUCKDB (CLI used by `dashboard --check`; default: downloaded)
 set -euo pipefail
@@ -58,6 +59,10 @@ echo "== package =="
 STAGE="$DIST/stage/$NAME"
 rm -rf "$STAGE"; mkdir -p "$STAGE"
 cp "$BIN/dashboard$EXE" "$BIN/serve$EXE" "$ROOT/README.md" "$ROOT/LICENSE" "$STAGE/"
+# the agent skills of this version (#1389; also an asset of their own,
+# package-skills.sh)
+mkdir -p "$STAGE/skills"
+cp -R "$ROOT/plugins/anofox-visualization" "$STAGE/skills/"
 cd "$DIST/stage"
 case "$PLATFORM" in
   windows_*) rm -f "$DIST/$NAME.zip"; "$PYTHON" -m zipfile -c "$DIST/$NAME.zip" "$NAME"; OUT="$DIST/$NAME.zip" ;;
