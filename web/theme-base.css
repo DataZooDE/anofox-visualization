@@ -1106,5 +1106,5 @@ body.dp-fit-measuring,body.dp-fit-measuring *{transition:none !important}
 .dp-map-find input:focus-visible{outline:2px solid var(--ax-accent);outline-offset:1px}
 /* M3e-1 (#646): 'print'::NORTH_ARROW — drawn for print / PNG / --svg, not on screen */
 @media screen{.panel svg .dp-print-only{display:none}}
-/* a display formula wider than its column even when drawn smaller (fitMath): fade at the cut edge */
-.md-math-display.dp-math-more{-webkit-mask-image:linear-gradient(90deg,#000 85%,transparent);mask-image:linear-gradient(90deg,#000 85%,transparent)}
+/* a display formula wider than its column even when drawn smaller (fitMath): fade at the cut edge (a mask: only the alpha counts) */
+.md-math-display.dp-math-more{-webkit-mask-image:linear-gradient(90deg,var(--ax-ink) 85%,transparent);mask-image:linear-gradient(90deg,var(--ax-ink) 85%,transparent)}
