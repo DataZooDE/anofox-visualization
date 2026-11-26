@@ -91,10 +91,24 @@ fn end_legend_names_each_line_at_its_end() {
     let label = r
         .svg
         .split("<text")
-        .find(|t| t.contains(">Chain<"))
+        .map(|t| t.split("</text>").next().unwrap_or(""))
+        .find(|t| t.ends_with(">Chain"))
         .expect("a label for Chain");
     assert!(
         label.to_ascii_lowercase().contains("#2563eb"),
         "drawn in the line's colour: {label}"
+    );
+    // a phone-width chart (ggplot-rs 0.67.1): the labels' band would squeeze
+    // the panel, so the usual legend goes below and its text is ink
+    let r = render_with_warnings(&cols, 290, 320, &RenderOptions::default()).expect("renders");
+    let label = r
+        .svg
+        .split("<text")
+        .map(|t| t.split("</text>").next().unwrap_or(""))
+        .find(|t| t.ends_with(">Chain"))
+        .expect("a legend entry for Chain");
+    assert!(
+        !label.to_ascii_lowercase().contains("#2563eb"),
+        "narrow: a legend, not a label in the line's colour: {label}"
     );
 }
