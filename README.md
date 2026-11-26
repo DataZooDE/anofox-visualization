@@ -3,7 +3,7 @@
 <a href="https://datazoode.github.io/anofox-visualization/">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/img/readme-hero-dark.png">
-    <img alt="A sales cockpit built from SQL: period filters, KPI tiles with deltas and sparklines, weekly revenue against the prior year, and a channel-mix donut" src="docs/img/readme-hero-light.png">
+    <img alt="A sales dashboard built from SQL: a period picker, KPI tiles with deltas and sparklines, monthly revenue against the year before, and revenue by channel" src="docs/img/readme-hero-light.png">
   </picture>
 </a>
 
