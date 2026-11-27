@@ -138,14 +138,6 @@ pub fn reads(sql: &str, implicit: &HashMap<String, Deps>) -> Deps {
         match t.kind {
             TokKind::Word => {
                 let w = text.to_lowercase();
-                // `$name` (DuckDB 2.0): the same read as getvariable('name')
-                if k > 0 && toks[k - 1].is_punct(sql, '$') && toks[k - 1].end == t.start {
-                    if !w.is_ascii() {
-                        return Deps::All;
-                    }
-                    out.insert(&w);
-                    continue;
-                }
                 if w == "getvariable" {
                     let qualified_ok = k == 0
                         || !toks[k - 1].is_punct(sql, '.')
@@ -171,6 +163,26 @@ pub fn reads(sql: &str, implicit: &HashMap<String, Deps>) -> Deps {
                     out.extend(d);
                 }
             }
+            // `$name` (DuckDB 2.0): the same read as getvariable('name') —
+            // also `$ name`, `$/* … */name` and `$"name"`, which DuckDB reads
+            // alike (comments and spaces are no tokens here); a `$` before
+            // anything else but a parameter number is not seen through
+            TokKind::Punct if text == "$" => match toks.get(k + 1) {
+                Some(n) if n.kind == TokKind::Number => {}
+                Some(n) if matches!(n.kind, TokKind::Word | TokKind::QuotedIdent) => {
+                    let name = n.text(sql);
+                    let name = if n.kind == TokKind::QuotedIdent {
+                        unquote(name)
+                    } else {
+                        name.to_string()
+                    };
+                    if !name.is_ascii() {
+                        return Deps::All;
+                    }
+                    out.insert(&name);
+                }
+                _ => return Deps::All,
+            },
             TokKind::QuotedIdent => {
                 let w = unquote(text).to_lowercase();
                 if w == "getvariable" || DYNAMIC.contains(&w.as_str()) {
@@ -418,6 +430,15 @@ mod tests {
         // a parameter ($1) and a dollar-quoted string are no variable
         assert_eq!(reads("SELECT $1, $$x$$", &none), set(&[]));
         assert_eq!(reads("SELECT $tag$getvariable$tag$", &none), Deps::All);
+        // the forms DuckDB 2.0 reads alike (security review of #1409)
+        assert_eq!(reads("SELECT $ region", &none), set(&["region"]));
+        assert_eq!(reads("SELECT $/* c */region", &none), set(&["region"]));
+        assert_eq!(reads("SELECT $\n  region", &none), set(&["region"]));
+        assert_eq!(
+            reads("SELECT $\"__CLAIM_user\"", &none),
+            set(&["__claim_user"])
+        );
+        assert_eq!(reads("SELECT $ (1)", &none), Deps::All);
     }
 
     #[test]
