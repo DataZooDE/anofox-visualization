@@ -704,6 +704,12 @@ These silently break a panel (it renders wrong or vanishes):
 12. **Annotations are per row.** `::XLINE_LABEL`, `::XBAND_FROM`/`_TO`/`_LABEL` and `::ANNOTATE` read the row they are on: `LEFT JOIN events e ON e.day = s.day` and select `e.day::XLINE, e.note::XLINE_LABEL` — only the rows that carry an event draw it.
 13. **`::THRESHOLDS` inside a `::TABLE` statement is just a column.** Put the table's rules in their own statement before it, naming the columns.
 14. **`::VIEW` switchers**: shared controls (inputs, KPIs, filters) go *above* the first `::VIEW` marker, not inside one of the alternatives — a view's own panels only show while that view is open. Close the group with `::ENDVIEW` if panels that are not part of it follow (another `::GROUP`, another `::VIEW` group, or plain panels); it's optional when a `::TAB` / `::SUBTAB` / `::SECTION` or the end of the script follows instead.
+15. **DuckDB 2.0** reads every shipped dashboard unchanged, but a few things change for SQL you write:
+    - Integer division and modulo by zero raise an error; write `x // nullif(n, 0)`.
+    - `~` matches part of the text, as `regexp_matches` does.
+    - An untyped `NULL` keeps the NULL type: cast it, e.g. `NULL::DOUBLE`.
+    - Lambdas are `lambda x: x + 1`, not `x -> x + 1`.
+    - `$name` reads a variable like `getvariable('name')`, but 1.5 can't parse it. Keep `getvariable` while a dashboard must run on both.
 
 <!-- assist:end -->
 
