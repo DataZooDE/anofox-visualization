@@ -815,6 +815,9 @@ pub fn answer(
     let read = |name: &str| {
         readers.contains(&format!("getvariable('{name}')"))
             || readers.contains(&format!("getvariable(\"{name}\")"))
+            // DuckDB 2.0's `$name` / `$"name"` (spaces are gone here)
+            || readers.contains(&format!("${name}"))
+            || readers.contains(&format!("$\"{name}\""))
     };
     let mut vars = Map::new();
     let mut resolved = Map::new();

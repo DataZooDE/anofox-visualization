@@ -25,6 +25,15 @@ the other anofox_* extensions this one conformance-tests against
 (statistics, optimize, tabular, forecast) have 2.0 builds. See issue #352 and
 `research-duckdb-2.0.md` for the full migration plan.
 
+On 2.0, `$name` reads a variable as `getvariable('name')` does, and is
+treated the same way (#1404):
+- the locked server keys its caches on it and sets it for the panel;
+- a policy's row filter may read only `$__claim_…`, and a mapping reads none;
+- the builder re-runs the panels reading it.
+
+The access policy's function list is reviewed against 2.0.1 too. Keep
+`$name` out of dashboards that must also run on 1.5, which can't parse it.
+
 ---
 
 ## 1. The annotation model

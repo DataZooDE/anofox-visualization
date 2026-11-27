@@ -620,6 +620,12 @@ impl Walker<'_> {
         if let Some(f) = o.get("function_name").and_then(Value::as_str) {
             self.function(f, o)?;
         }
+        // DuckDB 2.0's `$name` (#1404) reads the variable as getvariable('name')
+        // does, but serializes as a parameter, not a function call: the same
+        // rules hold for it
+        if ty == "VALUE_PARAMETER" {
+            self.variable_ref(s(o, "identifier"))?;
+        }
         if ty == "COLUMN_REF" {
             if let Some(Value::String(c)) = o
                 .get("column_names")
@@ -945,6 +951,18 @@ impl Walker<'_> {
             Err(format!(
                 "table function '{name}()' is not allowed under the access policy"
             ))
+        }
+    }
+
+    /// A `$name` parameter: a mapping reads no variables, a row filter only
+    /// claims — as for getvariable() in [`Walker::function`].
+    fn variable_ref(&self, name: &str) -> Result<(), String> {
+        match self.mode {
+            Mode::Mapping => Err(format!("a mapping can't read session variables (${name})")),
+            Mode::Rows if !name.to_ascii_lowercase().starts_with(CLAIM_PREFIX) => Err(format!(
+                "a row filter may only read claims: ${name} is not a __claim_… variable"
+            )),
+            _ => Ok(()),
         }
     }
 
@@ -2260,6 +2278,23 @@ mod tests {
                 "class": "CONSTANT", "type": "VALUE_CONSTANT",
                 "literal": {"kind": "INTEGER", "text": "1"}}}]});
         assert!(run(gv2_int).is_err(), "not a string literal");
+        // DuckDB 2.0's `$name` (#1404): a PARAMETER node, not a getvariable()
+        // call — a variable read all the same
+        let par = |id: &str| serde_json::json!({"class": "PARAMETER", "type": "VALUE_PARAMETER", "identifier": id});
+        assert!(run(par("__claim_user")).is_ok());
+        assert!(run(par("region")).is_err(), "$region: a viewer variable");
+        assert!(
+            Walker::new(Mode::Mapping, &enf, &temps)
+                .walk(&mut par("__claim_user"))
+                .is_err(),
+            "a mapping reads no variables, $name either"
+        );
+        assert!(
+            Walker::new(Mode::Rewrite, &enf, &temps)
+                .walk(&mut par("region"))
+                .is_ok(),
+            "a dashboard statement reads its variables"
+        );
         // Plain table names in a row filter point at the snapshot.
         let mut t = base("user_regions");
         run(t.clone()).unwrap();

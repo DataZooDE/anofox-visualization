@@ -7,8 +7,8 @@
 # extension functions per policy (`functions`). tests/policy_duckdb.rs fails
 # when the pinned DuckDB has a function that is not listed: classify it here.
 #
-# Also reclassified against DuckDB 2.0.0 (#357): a block near the end of this
-# file covers every function 2.0 added, including every `collate_<locale>`
+# Also reclassified against DuckDB 2.0.0 (#357) and 2.0.1 (#1404): blocks near the end of this
+# file cover every function 2.0 added, including every `collate_<locale>`
 # name (a second, unprefixed name 2.0 gives the same per-locale collations as
 # the existing `icu_collate_<locale>`, below) listed individually — unlike
 # `icu_collate_*`, there is no `collate_*` wildcard in the code, so a locale
@@ -1170,3 +1170,11 @@ scalar allow collate_zh_mo  # ICU per-locale collation, same review as icu_colla
 scalar allow collate_zh_sg  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
 scalar allow collate_zh_tw  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
 scalar allow collate_zu  # ICU per-locale collation, same review as icu_collate_* (2.0 added the unprefixed name)
+#
+# DuckDB 2.0.1 additions (#1404), reviewed against duckdb_functions() of the
+# 2.0.0 and 2.0.1 CLIs (fmod moved from a macro to a scalar; listed above):
+table deny add_grammar_extension  # changes the SQL parser of the connection
+table deny remove_grammar_extension  # changes the SQL parser of the connection
+table deny duckdb_live_query_metrics  # the queries running now, other viewers' too
+table deny parquet_page_index  # reads files (as parquet_metadata)
+scalar deny map_type_id_to_pg_oid  # catalog (pg_catalog helper, as map_to_pg_oid)

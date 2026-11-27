@@ -624,6 +624,26 @@ fn statements_other_than_queries_are_refused() {
     ] {
         f.refused(&[q, "SELECT 1"], why);
     }
+    // DuckDB 2.0's new statements (#1404): refused — on 1.5 they don't parse;
+    // a data-modifying CTE looks like a query but writes.
+    for q in [
+        "WITH d AS (DELETE FROM sales RETURNING *) SELECT * FROM d",
+        "WITH d AS (INSERT INTO sales VALUES (9, 'EU', 1) RETURNING *) SELECT 1",
+        "CONNECT 'quack://localhost:9494'",
+        "CREATE EXTENSION REPOSITORY r WITH PREFIX 'https://x.example'",
+        "CREATE TRIGGER t AFTER INSERT ON sales FOR EACH ROW INSERT INTO sales VALUES (9, 'EU', 1)",
+        "SELECT * FROM add_grammar_extension('x')",
+        "SELECT * FROM duckdb_live_query_metrics()",
+    ] {
+        match f.rewrite(&[q, "SELECT 1"]) {
+            Ok(s) => panic!("accepted: {q} → {s:?}"),
+            Err(e) => {
+                if std::env::var_os("SHOW_REFUSALS").is_some() {
+                    eprintln!("REFUSED {q}: {e}");
+                }
+            }
+        }
+    }
     // DESCRIBE of a query on a policy table shows the viewer's columns only.
     let s = f.rewrite(&["DESCRIBE SELECT * FROM emp"]).unwrap();
     let names = col(&f.run(&s, &viewer("alice", &[])).unwrap(), "column_name");
@@ -646,6 +666,8 @@ fn a_row_filter_reads_only_claims() {
     };
     for (rows, why) in [
         ("region = getvariable('region')", "only read claims"),
+        // DuckDB 2.0's `$name` reads a variable too (#1404)
+        ("region = $region", "only read claims"),
         (
             "region = getvariable(lower('__claim_x'))",
             "only read claims",
