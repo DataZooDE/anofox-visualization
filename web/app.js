@@ -1522,7 +1522,7 @@ async function askReadNow(stmts, req) {
   const now = builderAskView().vars;
   const over = Object.entries(req.vars || {}).filter(([k, v]) => /^[A-Za-z_]\w*$/.test(k) && JSON.stringify(now[k]) !== JSON.stringify(v));
   if (!over.length) return req.page ? runSql(sql, undefined, undefined, undefined, req.panel, null) : panelSql(sql, req.panel, null);
-  const reads = (k) => new RegExp(`getvariable\\s*\\(\\s*'${k}'\\s*\\)`, "i");
+  const reads = (k) => new RegExp(`getvariable\\s*\\(\\s*'${k}'\\s*\\)|\\$${k}(?![\\w$])`, "i"); // (or 2.0's $name)
   const setup = stmts.filter((s, k) => s.setup && k < req.panel);
   const setv = (s) => /^\s*SET\s+VARIABLE\b/i.test(sqlCode(s.sql));
   for (const [k] of over)
@@ -9634,8 +9634,9 @@ function patchSlots(roots, newRoots, swaps) {
 // #1271: on a locked server with scenarios, every statement reads the
 // ::SCENARIO picker's choice through the search path, so its value is part of
 // every statement's signature (cache key, re-run), not only of those naming it
-// with getvariable(). One line: tests/web lift this declaration as it is.
-const varsOf = (sql) => ((own, pick) => (pick && !own.some((v) => v.toLowerCase() === String(pick).toLowerCase()) ? [...own, pick] : own))([...String(sql).matchAll(/getvariable\s*\(\s*'([^']+)'/gi)].map((m) => m[1]), typeof window !== "undefined" && window.__served && window.__served.scenarioVar);
+// with getvariable() or DuckDB 2.0's `$name` (#1404). One line: tests/web lift
+// this declaration as it is.
+const varsOf = (sql) => ((own, pick) => (pick && !own.some((v) => v.toLowerCase() === String(pick).toLowerCase()) ? [...own, pick] : own))([...String(sql).matchAll(/getvariable\s*\(\s*'([^']+)'|\$([A-Za-z_]\w*)(?![\w$])/gi)].map((m) => m[1] ?? m[2]), typeof window !== "undefined" && window.__served && window.__served.scenarioVar);
 
 // #416: the dashboard's own `SET VARIABLE` setup statements that need a
 // corrective re-run once every viewer value (an input's pick, a URL seed, a

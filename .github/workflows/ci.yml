@@ -298,9 +298,9 @@ jobs:
       # The bundled tree is v1.5.6, so the step above only exercises the 1.5
       # side of the API detection. This compiles the 2.0 side too, including
       # NameParameter's static_assert (#1015).
-      - name: Compile the extension source against DuckDB v2.0.0 headers
+      - name: Compile the extension source against DuckDB v2.0.1 headers
         run: |
-          git -c advice.detachedHead=false clone --quiet --depth 1 --branch v2.0.0 --filter=blob:none --sparse https://github.com/duckdb/duckdb.git "$RUNNER_TEMP/duckdb-v2"
+          git -c advice.detachedHead=false clone --quiet --depth 1 --branch v2.0.1 --filter=blob:none --sparse https://github.com/duckdb/duckdb.git "$RUNNER_TEMP/duckdb-v2"
           git -C "$RUNNER_TEMP/duckdb-v2" sparse-checkout set src/include
           DUCKDB_INCLUDE="$RUNNER_TEMP/duckdb-v2/src/include" scripts/check_compat_stray_headers.sh
 
@@ -360,7 +360,7 @@ jobs:
     # (`.duckdb-version`) stays at v1.5.6 until ~2.0.1, but research found the
     # Rust C-API cdylib (C_STRUCT, C-API v1.2.0) built for 1.5.6 loads
     # unchanged on 2.0.0 (research-duckdb-2.0.md). This job builds it fresh
-    # against a real 2.0.0 CLI and runs the locked-server end-to-end smoke
+    # against a real 2.0.1 CLI and runs the locked-server end-to-end smoke
     # test, so a future break shows up here without failing CI. The 2.0
     # release asset is named differently (`duckdb-cli-...tar.gz`, not
     # `duckdb_cli-...zip`) — the pinned jobs above keep the old name.
@@ -385,18 +385,18 @@ jobs:
 
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
 
-      - name: Cache DuckDB CLI (2.0.0)
+      - name: Cache DuckDB CLI (2.0.1)
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ~/.local/duckdb-2.0.0
-          key: duckdb-cli-2.0.0-linux-amd64
+          path: ~/.local/duckdb-2.0.1
+          key: duckdb-cli-2.0.1-linux-amd64
 
-      - name: Install DuckDB CLI (2.0.0)
+      - name: Install DuckDB CLI (2.0.1)
         run: |
-          d="$HOME/.local/duckdb-2.0.0"
+          d="$HOME/.local/duckdb-2.0.1"
           if [ ! -x "$d/duckdb" ]; then
             mkdir -p "$d"
-            curl -fsSL --retry 3 -o duckdb.tar.gz https://github.com/duckdb/duckdb/releases/download/v2.0.0/duckdb-cli-linux-amd64.tar.gz
+            curl -fsSL --retry 3 -o duckdb.tar.gz https://github.com/duckdb/duckdb/releases/download/v2.0.1/duckdb-cli-linux-amd64.tar.gz
             tar -xzf duckdb.tar.gz -C "$d"
             chmod +x "$d/duckdb"
           fi
@@ -1845,9 +1845,9 @@ jobs:
 
       - name: Install DuckDB 2.0 CLI
         run: |
-          d="$HOME/.local/duckdb-2.0.0"
+          d="$HOME/.local/duckdb-2.0.1"
           mkdir -p "$d"
-          curl -fsSL --retry 3 -o duckdb2.tar.gz https://github.com/duckdb/duckdb/releases/download/v2.0.0/duckdb-cli-linux-amd64.tar.gz
+          curl -fsSL --retry 3 -o duckdb2.tar.gz https://github.com/duckdb/duckdb/releases/download/v2.0.1/duckdb-cli-linux-amd64.tar.gz
           tar -xzf duckdb2.tar.gz -C "$d"
           chmod +x "$d/duckdb"
           "$d/duckdb" --version

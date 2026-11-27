@@ -17,6 +17,7 @@
 //!   [`catalog_reads`]) adds what it reads; a string literal that mentions
 //!   `getvariable` / `duckdb_variables` or names such an object (a table
 //!   function can take a view's name) is All.
+//! * DuckDB 2.0's `$name` (a `$` right before the name) reads `name` (#1404).
 //! * `${name}` in the statement's `-- @requires` (and its tab's) reads `name`.
 //! * Setup before a statement: `SET VARIABLE v = expr` adds what `expr` reads
 //!   when `v` is needed; any other setup statement (a TEMP view, macro or
@@ -137,6 +138,14 @@ pub fn reads(sql: &str, implicit: &HashMap<String, Deps>) -> Deps {
         match t.kind {
             TokKind::Word => {
                 let w = text.to_lowercase();
+                // `$name` (DuckDB 2.0): the same read as getvariable('name')
+                if k > 0 && toks[k - 1].is_punct(sql, '$') && toks[k - 1].end == t.start {
+                    if !w.is_ascii() {
+                        return Deps::All;
+                    }
+                    out.insert(&w);
+                    continue;
+                }
                 if w == "getvariable" {
                     let qualified_ok = k == 0
                         || !toks[k - 1].is_punct(sql, '.')
@@ -394,6 +403,23 @@ mod tests {
     }
 
     // --- literals ---
+    #[test]
+    fn dollar_name_reads_its_variable() {
+        let none = HashMap::new();
+        let set = |v: &[&str]| Deps::Vars(v.iter().map(|s| s.to_string()).collect());
+        assert_eq!(
+            reads("SELECT * FROM t WHERE region = $region", &none),
+            set(&["region"])
+        );
+        assert_eq!(
+            reads("SELECT $Region, $__claim_user", &none),
+            set(&["region", "__claim_user"])
+        );
+        // a parameter ($1) and a dollar-quoted string are no variable
+        assert_eq!(reads("SELECT $1, $$x$$", &none), set(&[]));
+        assert_eq!(reads("SELECT $tag$getvariable$tag$", &none), Deps::All);
+    }
+
     #[test]
     fn literal_getvariable_reads_its_name() {
         assert_eq!(

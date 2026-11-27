@@ -66,7 +66,7 @@ jobs:
       exclude_archs: "windows_amd64_mingw;wasm_mvp;wasm_eh;wasm_threads"
 
   # #352: DuckDB 2.0 LTS shipped 2026-10-21; the community-extensions repo now
-  # builds every PR against v2.0.0 by default (a v1.5.6 build needs the
+  # builds every PR against v2.0.1 by default (a v1.5.6 build needs the
   # separate `variegata` field, see duckext/DISTRIBUTING.md). Our own release
   # pin (`.duckdb-version`) stays at v1.5.6 until ~2.0.1 (owner decision), so
   # this job tells us as soon as csrc/ or CMakeLists.txt stop compiling
@@ -82,7 +82,7 @@ jobs:
     if: needs.lane.outputs.full == 'true'
     uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@v2.0-cyanoptera
     with:
-      duckdb_version: v2.0.0
+      duckdb_version: v2.0.1
       ci_tools_version: v2.0-cyanoptera
       extension_name: anofox_visualization
       enable_rust: true
